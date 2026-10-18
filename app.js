@@ -16,6 +16,14 @@ const TYPES = {
   mileage:{label:"Mileage",short:"Mileage",blurb:"You drove your own vehicle for club business.",attach:false,
     cols:[{k:"date",l:"Date",t:"date"},{k:"from",l:"From",t:"text"},{k:"to",l:"To",t:"text"},{k:"purpose",l:"Purpose",t:"text"},{k:"miles",l:"Miles (one way)",t:"num"},{k:"ret",l:"Return",t:"check"},{k:"passengers",l:"Colleagues carried",t:"num",optional:true},{k:"chargeable_miles",l:"Claimable miles",t:"chg"},{k:"_amt",l:"Amount",t:"calc"}]}
 };
+TYPES.supplier = {label:"Supplier invoice",short:"Supplier",blurb:"Log an invoice from an external provider, such as a physio or pitch hire.",attach:true,attachHint:"Upload the supplier's invoice (PDF preferred).",
+  cols:[{k:"item",l:"Description",t:"text"},{k:"net",l:"Amount £",t:"money"}],
+  vatCols:[{k:"item",l:"Description",t:"text"},{k:"net",l:"Net £",t:"money"},{k:"vat_rate",l:"VAT rate",t:"vatrate"},{k:"vat",l:"VAT £",t:"vatcalc"},{k:"_amt",l:"Gross £",t:"calc"}]};
+const colsFor = (t, vat) => (vat && TYPES[t].vatCols) ? TYPES[t].vatCols : TYPES[t].cols;
+const DISPLAY_ONLY = ["calc","rate","chg","vatcalc"];
+const NUMERIC_COLS = ["calc","money","num","rate","chg","vatcalc"];
+const lineVat = l => l.vat_rate === "" || l.vat_rate == null ? Math.round(num(l.net) * 20) / 100 : Math.round(num(l.net) * num(l.vat_rate)) / 100;
+const fmtSort = v => { v = String(v || "").replace(/\D/g, ""); return v.length === 6 ? v.slice(0,2) + "-" + v.slice(2,4) + "-" + v.slice(4) : v; };
 const STATUS = {
   pending:{label:"Awaiting 1st approval",cls:"pending"},
   first_approved:{label:"Awaiting 2nd approval",cls:"pending"},
@@ -25,7 +33,7 @@ const STATUS = {
   withdrawn:{label:"Withdrawn",cls:"withdrawn"}
 };
 
-const S = {sb:null,user:null,me:null,settings:{mileage_rate:null,budget_areas:DEFAULT_AREAS},claims:[],people:{},names:{},
+const S = {sb:null,user:null,me:null,settings:{mileage_rate:null,budget_areas:DEFAULT_AREAS},claims:[],people:{},names:{},banks:{},payees:{},myBank:null,viewAsCoach:false,
   tab:null,draft:null,authView:"signin",authMsg:"",recovery:false,lastSubmitted:null,decideOpen:null,confirmWithdraw:null,
   bkFilter:"ready",editingDetails:false,channel:null,loaded:false};
 
@@ -44,11 +52,13 @@ function personName(id){ const p = S.people[id]; return (p && p.full_name) || S.
 function headline(c){ return c.type === "payroll" && !num(c.total) ? fmtH(c.hours) : gbp(c.total); }
 
 /* ---------- roles ---------- */
-const types = () => (S.me && S.me.approver_types) || [];
+const coachView = () => !!S.viewAsCoach;
+const types = () => coachView() ? [] : ((S.me && S.me.approver_types) || []);
 const isApproverFor = t => types().includes(t);
 const isApproverAny = () => types().length > 0;
-const isBookkeeper = () => !!(S.me && S.me.is_bookkeeper);
-const isAdmin = () => !!(S.me && S.me.is_admin);
+const isBookkeeper = () => !coachView() && !!(S.me && S.me.is_bookkeeper);
+const isAdmin = () => !coachView() && !!(S.me && S.me.is_admin);
+const canLogSuppliers = () => !coachView() && !!(S.me && (S.me.is_admin || S.me.is_bookkeeper || S.me.can_log_suppliers));
 function myRoles(){ const r = ["Coach"]; if (isApproverAny()) r.push("Approver"); if (isBookkeeper()) r.push("Bookkeeper"); if (isAdmin()) r.push("Admin"); return r; }
 function toApprove(){
   return S.claims.filter(c => c.claimant !== S.me.id && isApproverFor(c.type) &&
@@ -95,6 +105,7 @@ function rulesText(src){
 }
 function lineAmount(type, l, rate){
   if (type === "expense") return num(l.amount);
+  if (type === "supplier") return Math.round((num(l.net) + (S.draft && S.draft.vat_invoice ? lineVat(l) : 0)) * 100) / 100;
   if (type === "invoice" || type === "payroll") return num(l.hours) * num(hourlyRate(l.activity));
   if (type === "mileage") return num(l.miles) * (l.ret ? 2 : 1) * num(rate);
   return 0;
@@ -102,6 +113,7 @@ function lineAmount(type, l, rate){
 function totals(type, lines, rate){
   let amount = 0, hours = 0, miles = 0;
   if (type === "mileage"){ const ml = mileageLines(lines); let ch = 0; for (const x of ml){ amount += x.amt; miles += x.m; ch += x.ch; } return {amount: Math.round(amount * 100) / 100, hours, miles, chargeable: ch}; }
+  if (type === "supplier"){ let net = 0, vat = 0; const v = S.draft && S.draft.vat_invoice; for (const l of lines){ net += num(l.net); if (v) vat += lineVat(l); } net = Math.round(net * 100) / 100; vat = Math.round(vat * 100) / 100; return {amount: Math.round((net + vat) * 100) / 100, net, vat, hours, miles}; }
   for (const l of lines){ amount += lineAmount(type, l, rate); hours += num(l.hours); miles += num(l.miles) * (l.ret ? 2 : 1); }
   return {amount: Math.round(amount * 100) / 100, hours, miles};
 }
@@ -120,7 +132,7 @@ function renderHeader(){
   const list = tabsList();
   if (list.length && !list.some(t => t.id === S.tab)) S.tab = list[0].id;
   $("#tabs").innerHTML = list.map(t => `<button role="tab" data-act="tab" data-tab="${t.id}" aria-selected="${S.tab === t.id}">${esc(t.l)}${t.n ? `<span class="count">${t.n}</span>` : ""}</button>`).join("");
-  $("#who").innerHTML = S.user ? `<span>${esc((S.me && S.me.full_name) || S.user.email)}</span>${S.me && S.me.active ? myRoles().map(r => `<span class="role">${esc(r)}</span>`).join("") : ""}${S.me && S.me.active ? `<button class="signout" data-act="edit-details">My account</button>` : ""}<button class="signout" data-act="signout">Sign out</button>` : "";
+  $("#who").innerHTML = S.user ? `<span>${esc((S.me && S.me.full_name) || S.user.email)}</span>${S.me && S.me.active ? myRoles().map(r => `<span class="role">${esc(r)}</span>`).join("") : ""}${S.me && S.me.active && S.me.is_admin ? `<button class="signout" data-act="coach-view">${coachView() ? "Exit coach view" : "View as coach"}</button>` : ""}${S.me && S.me.active ? `<button class="signout" data-act="edit-details">My account</button>` : ""}<button class="signout" data-act="signout">Sign out</button>` : "";
 }
 function render(){
   renderHeader();
@@ -131,7 +143,7 @@ function render(){
   if (!S.me) { m.innerHTML = `<div class="panel"><h2>Account problem</h2><p class="lede">Your login worked, but your club profile is missing. Ask the club admin to check the setup.</p></div>`; return; }
   if (!S.me.active) { m.innerHTML = viewInactive(); return; }
   const v = {new:viewNew, mine:viewMine, approve:viewApprove, books:viewBooks, people:viewPeople, settings:viewSettings}[S.tab] || viewNew;
-  m.innerHTML = (S.me.accepted_terms_at ? "" : `<div class="notice warn row"><span style="flex:1">Please read the <a href="privacy.html" target="_blank" rel="noopener">privacy notice</a> and <a href="terms.html" target="_blank" rel="noopener">terms of use</a> for the claims system.</span><button class="btn small primary" data-act="accept-terms">I've read and accept them</button></div>`) + v();
+  m.innerHTML = (coachView() ? `<div class="notice ok row"><span style="flex:1"><strong>Coach view.</strong> You're seeing the site as a coach would: only New claim and My claims, with only your own claims.</span><button class="btn small" data-act="coach-view">Back to admin view</button></div>` : "") + (S.me.accepted_terms_at ? "" : `<div class="notice warn row"><span style="flex:1">Please read the <a href="privacy.html" target="_blank" rel="noopener">privacy notice</a> and <a href="terms.html" target="_blank" rel="noopener">terms of use</a> for the claims system.</span><button class="btn small primary" data-act="accept-terms">I've read and accept them</button></div>`) + v();
   if (S.tab === "new") recalc();
 }
 /* Refresh after live changes, without wiping a form someone is filling in */
@@ -241,23 +253,33 @@ function detailsCard(){
     <div class="row end"><button class="btn" data-act="change-password">Change password</button></div>
   </section>
   <section class="panel">
+    <div><h3>Bank details</h3><p class="sub" style="margin:4px 0 0">Where the club pays your expenses, invoices and mileage. Only you and the bookkeeper can see these. You and the bookkeeper are emailed whenever they change. The club will never ask for your bank details by email.</p></div>
+    ${S.myBank ? `<div class="notice">Currently: <strong>${esc(S.myBank.account_name)}</strong>, sort code ${esc(fmtSort(S.myBank.sort_code))}, account ending ${esc(String(S.myBank.account_number).slice(-4))}. Last changed ${fmtDate(S.myBank.updated_at)}.</div>` : `<div class="notice warn">You haven't added bank details yet. You need them before submitting expenses, invoices or mileage.</div>`}
+    <div class="grid">
+      <label>Name on account<input id="bName" autocomplete="off" value="${esc(S.myBank ? S.myBank.account_name : me.full_name)}"></label>
+      <label>Sort code<input id="bSort" inputmode="numeric" placeholder="12-34-56" autocomplete="off"></label>
+      <label>Account number<input id="bAcct" inputmode="numeric" placeholder="8 digits" autocomplete="off"></label>
+    </div>
+    <div class="row end"><button class="btn primary" data-act="save-bank">${S.myBank ? "Update bank details" : "Save bank details"}</button></div>
+  </section>
+  <section class="panel">
     <div><h3>Your data</h3><p class="sub" style="margin:4px 0 0">Download a copy of your account details and every claim you've submitted. Read the <a href="privacy.html" target="_blank" rel="noopener">privacy notice</a> and <a href="terms.html" target="_blank" rel="noopener">terms of use</a>. To have your account closed, contact the club admin.</p></div>
     <div class="row"><button class="btn" data-act="download-data">Download my data</button><button class="btn" data-act="cancel-details">Back to my claims</button></div>
   </section>`;
 }
 
 /* ---------- new claim ---------- */
-function blankDraft(type){ return {editingId:null,editingRef:"",type:type||null,budget_area:"",team:"",description:"",invoice_number:"",invoice_date:today(),pay_period:new Date().toISOString().slice(0,7),lines:[{date:today()}],attachments:[],declare:false}; }
+function blankDraft(type){ return {editingId:null,editingRef:"",type:type||null,budget_area:"",team:"",description:"",invoice_number:"",invoice_date:today(),pay_period:new Date().toISOString().slice(0,7),lines:[{date:today()}],attachments:[],declare:false,supplier_name:"",supplier_email:"",due_date:"",vat_invoice:false,supplier_vat_number:"",bank_name:"",bank_sort:"",bank_acct:""}; }
 function viewNew(){
   if (S.lastSubmitted) return submittedView();
   if (!S.draft) S.draft = blankDraft();
   const d = S.draft;
   let h = `<section class="panel">
     <div><h2>${d.editingId ? "Edit and resubmit " + esc(d.editingRef) : "New claim"}</h2><p class="lede">Pick the kind of claim. It needs a first and a second approval, then it goes to the bookkeeper for payment.</p></div>
-    <div class="types" role="group" aria-label="Claim type">${Object.entries(TYPES).map(([k,t]) => `<button class="type" data-act="type" data-type="${k}" aria-pressed="${d.type === k}" ${d.editingId ? "disabled" : ""}><b>${esc(t.short)}</b><span>${esc(t.blurb)}</span></button>`).join("")}</div>
+    <div class="types" role="group" aria-label="Claim type">${Object.entries(TYPES).filter(([k]) => k !== "supplier" || canLogSuppliers() || d.type === "supplier").map(([k,t]) => `<button class="type" data-act="type" data-type="${k}" aria-pressed="${d.type === k}" ${d.editingId ? "disabled" : ""}><b>${esc(t.short)}</b><span>${esc(t.blurb)}</span></button>`).join("")}</div>
   </section>`;
   if (!d.type) return h + inProgressHint();
-  const T = TYPES[d.type], areas = (S.settings.budget_areas && S.settings.budget_areas.length) ? S.settings.budget_areas : DEFAULT_AREAS;
+  const T = TYPES[d.type], COLS = colsFor(d.type, d.vat_invoice), areas = (S.settings.budget_areas && S.settings.budget_areas.length) ? S.settings.budget_areas : DEFAULT_AREAS;
   const rate = S.settings.mileage_rate;
   h += `<section class="panel" id="claimForm">
     <div class="row"><h2 style="flex:1">${esc(T.label)}</h2><span class="sub">Paying ${esc(S.me.full_name)}</span></div>
@@ -267,14 +289,16 @@ function viewNew(){
     <div class="grid">
       <label>Budget area<select id="fArea" data-f="budget_area"><option value="">Choose…</option>${areas.map(a => `<option ${d.budget_area === a ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></label>
       <label>Team / squad <span class="hint">e.g. U14 girls, Men's 2s</span><input id="fTeam" data-f="team" value="${esc(d.team)}"></label>
+      ${d.type === "supplier" ? `<label>Supplier name<input id="fSupName" data-f="supplier_name" value="${esc(d.supplier_name)}" placeholder="e.g. Smith Physiotherapy Ltd"></label><label>Supplier email <span class="hint">Optional</span><input id="fSupEmail" type="email" data-f="supplier_email" value="${esc(d.supplier_email)}"></label><label>Invoice number<input id="fInvNo" data-f="invoice_number" value="${esc(d.invoice_number)}"></label><label>Invoice date<input id="fInvDate" type="date" data-f="invoice_date" value="${esc(d.invoice_date)}"></label><label>Payment due<input id="fDue" type="date" data-f="due_date" value="${esc(d.due_date)}"></label>` : ""}
       ${d.type === "invoice" ? `<label>Invoice number<input id="fInvNo" data-f="invoice_number" value="${esc(d.invoice_number)}"></label><label>Invoice date<input id="fInvDate" type="date" data-f="invoice_date" value="${esc(d.invoice_date)}"></label>` : ""}
       ${d.type === "payroll" ? `<label>Pay period<input id="fPeriod" type="month" data-f="pay_period" value="${esc(d.pay_period)}"></label>` : ""}
     </div>
+    ${d.type === "supplier" ? `<label style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="fVat" data-f="vat_invoice" ${d.vat_invoice ? "checked" : ""}> This is a VAT invoice <span class="hint">(it shows the supplier's VAT number and a VAT amount)</span></label>${d.vat_invoice ? `<label style="max-width:320px">Supplier's VAT number<input id="fVatNo" data-f="supplier_vat_number" value="${esc(d.supplier_vat_number)}" placeholder="e.g. GB123456789"></label>` : ""}` : ""}
     <label>What is this claim for?<textarea id="fDesc" data-f="description" placeholder="${d.type === "mileage" ? "e.g. Driving to the U14 regional tournament" : d.type === "expense" ? "e.g. First-aid kit restock for match day" : "e.g. U14 girls Sunday sessions, October"}">${esc(d.description)}</textarea></label>
     <div>
       <h3 style="margin-bottom:8px">${d.type === "mileage" ? "Journeys" : d.type === "expense" ? "Items" : "Hours"}</h3>
-      <div class="tablebox"><table class="lines"><thead><tr>${T.cols.map(c => `<th class="${["calc","money","num","rate","chg"].includes(c.t) ? "num" : ""}">${esc(c.l)}</th>`).join("")}<th></th></tr></thead>
-      <tbody>${d.lines.map((l,i) => `<tr>${T.cols.map(c => lineCell(c,l,i)).join("")}<td><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></td></tr>`).join("")}</tbody></table></div>
+      <div class="tablebox"><table class="lines"><thead><tr>${COLS.map(c => `<th class="${NUMERIC_COLS.includes(c.t) ? "num" : ""}">${esc(c.l)}</th>`).join("")}<th></th></tr></thead>
+      <tbody>${d.lines.map((l,i) => `<tr>${COLS.map(c => lineCell(c,l,i)).join("")}<td><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></td></tr>`).join("")}</tbody></table></div>
       <div class="row" style="margin-top:10px"><button class="btn small" data-act="add-line">+ Add ${d.type === "mileage" ? "journey" : d.type === "expense" ? "item" : "session"}</button></div>
     </div>
     <div class="totals" id="totals"></div>
@@ -283,11 +307,20 @@ function viewNew(){
       <input type="file" id="fFile" multiple accept="image/*,application/pdf">
       <div class="files" id="fileList">${filesHtml(d.attachments, true)}</div>
     </div>` : ""}
+    ${bankFormSection(d)}
     <label style="flex-direction:row;align-items:flex-start;gap:10px;font-weight:400"><input type="checkbox" id="fDeclare" data-f="declare" ${d.declare ? "checked" : ""}> <span>I confirm this claim is accurate, was incurred on ${esc(CLUB)} business, and hasn't been claimed before.</span></label>
     <div class="notice bad" id="formErr" hidden></div>
     <div class="row end">${d.editingId ? `<button class="btn" data-act="cancel-edit">Cancel</button>` : `<button class="btn" data-act="reset">Clear form</button>`}<button class="btn primary" data-act="submit" id="submitBtn">${d.editingId ? "Resubmit claim" : "Submit claim"}</button></div>
   </section>`;
   return h;
+}
+function bankFormSection(d){
+  if (d.type === "payroll") return `<div class="notice">Payroll claims are paid through the club payroll, so no bank details are needed.</div>`;
+  if (d.type === "supplier") return `<div style="display:flex;flex-direction:column;gap:10px"><div><h3>Supplier's bank details</h3><p class="sub" style="margin:4px 0 0">Copy these from the invoice. If a supplier tells you their bank details have changed, phone them on a number you already know to confirm before submitting.</p></div>
+    <div class="grid"><label>Name on account<input id="fBankName" data-f="bank_name" value="${esc(d.bank_name)}" autocomplete="off"></label><label>Sort code<input id="fBankSort" data-f="bank_sort" value="${esc(d.bank_sort)}" inputmode="numeric" placeholder="12-34-56" autocomplete="off"></label><label>Account number<input id="fBankAcct" data-f="bank_acct" value="${esc(d.bank_acct)}" inputmode="numeric" placeholder="8 digits" autocomplete="off"></label></div></div>`;
+  const b = S.myBank;
+  return b ? `<div class="notice">Paid to <strong>${esc(b.account_name)}</strong>, account ending <strong>${esc(String(b.account_number).slice(-4))}</strong>. <button class="link" data-act="edit-details">Change bank details</button></div>`
+    : `<div class="notice warn">Add your bank details before submitting, so the club knows where to pay you. <button class="btn small" data-act="edit-details">Add bank details</button></div>`;
 }
 function inProgressHint(){
   const open = S.claims.filter(c => c.claimant === S.me.id && ["pending","first_approved","returned","approved"].includes(c.status)).length;
@@ -295,7 +328,8 @@ function inProgressHint(){
 }
 function lineCell(c, l, i){
   const id = `ln-${i}-${c.k}`, v = l[c.k] == null ? "" : l[c.k];
-  if (c.t === "calc" || c.t === "rate" || c.t === "chg") return `<td class="num calc" id="${id}">–</td>`;
+  if (DISPLAY_ONLY.includes(c.t)) return `<td class="num calc" id="${id}">–</td>`;
+  if (c.t === "vatrate") return `<td><select id="${id}" data-line="${i}" data-k="${c.k}" aria-label="VAT rate">${[20,5,0].map(v => `<option value="${v}" ${String(v === 20 && (l.vat_rate == null || l.vat_rate === "") ? 20 : l.vat_rate) === String(v) ? "selected" : ""}>${v}%</option>`).join("")}</select></td>`;
   if (c.t === "check") return `<td style="text-align:center;padding-top:12px"><input type="checkbox" id="${id}" data-line="${i}" data-k="${c.k}" ${v ? "checked" : ""} aria-label="Return journey"></td>`;
   if (c.t === "activity") return `<td><select id="${id}" data-line="${i}" data-k="${c.k}" aria-label="Activity"><option ${v !== "Umpiring" ? "selected" : ""}>Coaching</option><option ${v === "Umpiring" ? "selected" : ""}>Umpiring</option></select></td>`;
   const type = c.t === "date" ? "date" : (c.t === "text" ? "text" : "number");
@@ -310,24 +344,34 @@ function recalc(){
   const d = S.draft; if (!d || !d.type) return; const el = $("#totals"); if (!el) return;
   const rate = S.settings.mileage_rate;
   const ml = d.type === "mileage" ? mileageLines(d.lines) : null;
-  d.lines.forEach((l,i) => { const c = $(`#ln-${i}-_amt`); if (c) c.textContent = gbp(ml ? ml[i].amt : lineAmount(d.type, l, rate)); const cm = $(`#ln-${i}-chargeable_miles`); if (cm && ml) cm.textContent = ml[i].ch.toLocaleString("en-GB"); const r = $(`#ln-${i}-rate`); if (r){ const v = hourlyRate(l.activity); r.textContent = v == null ? "not set" : gbp(v); } });
+  d.lines.forEach((l,i) => { const c = $(`#ln-${i}-_amt`); if (c) c.textContent = gbp(ml ? ml[i].amt : lineAmount(d.type, l, rate)); const cm = $(`#ln-${i}-chargeable_miles`); if (cm && ml) cm.textContent = ml[i].ch.toLocaleString("en-GB"); const cv = $(`#ln-${i}-vat`); if (cv) cv.textContent = gbp(lineVat(l)); const r = $(`#ln-${i}-rate`); if (r){ const v = hourlyRate(l.activity); r.textContent = v == null ? "not set" : gbp(v); } });
   const t = totals(d.type, d.lines, rate);
   let out = "";
   if (d.type === "mileage") out += `<div><small>Miles driven</small><strong>${t.miles.toLocaleString("en-GB")}</strong></div><div><small>Claimable miles</small><strong>${t.chargeable.toLocaleString("en-GB")}</strong></div>`;
   if (d.type === "invoice" || d.type === "payroll") out += `<div><small>Total hours</small><strong>${fmtH(t.hours)}</strong></div>`;
-  out += `<div><small>Total claimed</small><strong>${gbp(t.amount)}</strong></div>`;
+  if (d.type === "supplier" && d.vat_invoice) out += `<div><small>Net</small><strong>${gbp(t.net)}</strong></div><div><small>VAT</small><strong>${gbp(t.vat)}</strong></div>`;
+  out += `<div><small>${d.type === "supplier" ? "Total to pay" : "Total claimed"}</small><strong>${gbp(t.amount)}</strong></div>`;
   el.innerHTML = out;
 }
 function validate(d){
-  const T = TYPES[d.type], errs = [];
+  const T = TYPES[d.type], COLS = colsFor(d.type, d.vat_invoice), errs = [];
+  if (d.type === "supplier"){
+    if (!d.supplier_name.trim()) errs.push("Add the supplier's name.");
+    if (!d.invoice_number.trim()) errs.push("Add the invoice number.");
+    if (d.vat_invoice && !d.supplier_vat_number.trim()) errs.push("Add the supplier's VAT number.");
+    if (!d.bank_name.trim()) errs.push("Add the name on the supplier's bank account.");
+    if (String(d.bank_sort).replace(/\D/g, "").length !== 6) errs.push("The supplier's sort code needs 6 digits.");
+    if (String(d.bank_acct).replace(/\D/g, "").length !== 8) errs.push("The supplier's account number needs 8 digits.");
+  }
+  if (["expense","invoice","mileage"].includes(d.type) && !S.myBank) errs.push("Add your bank details in My account first.");
   if (!d.budget_area) errs.push("Choose a budget area.");
   if (!d.description.trim()) errs.push("Say what the claim is for.");
   if (d.type === "invoice" && !d.invoice_number.trim()) errs.push("Add your invoice number.");
   if (d.type === "mileage" && S.settings.mileage_rate == null) errs.push("The club mileage rate isn't set yet.");
   for (const a of missingRates(d)) errs.push(`Your ${a.toLowerCase()} rate hasn't been set yet. Ask the club admin to add it.`);
-  const need = T.cols.filter(c => !["calc","check","rate","chg"].includes(c.t) && !c.optional).map(c => c.k);
-  d.lines.forEach((l,i) => { for (const k of need){ const v = l[k]; if (v == null || String(v).trim() === "" || (["amount","hours","miles","rate"].includes(k) && num(v) <= 0)){ errs.push(`Line ${i+1}: fill in ${T.cols.find(c => c.k === k).l.toLowerCase()}.`); break; } } });
-  if (T.attach && !d.attachments.length) errs.push(d.type === "invoice" ? "Upload your invoice." : "Upload at least one receipt.");
+  const need = COLS.filter(c => !DISPLAY_ONLY.concat(["check","vatrate"]).includes(c.t) && !c.optional).map(c => c.k);
+  d.lines.forEach((l,i) => { for (const k of need){ const v = l[k]; if (v == null || String(v).trim() === "" || (["amount","hours","miles","rate","net"].includes(k) && num(v) <= 0)){ errs.push(`Line ${i+1}: fill in ${COLS.find(c => c.k === k).l.toLowerCase()}.`); break; } } });
+  if (T.attach && !d.attachments.length) errs.push(d.type === "invoice" ? "Upload your invoice." : d.type === "supplier" ? "Upload the supplier's invoice." : "Upload at least one receipt.");
   if (!d.declare) errs.push("Tick the confirmation box.");
   return errs;
 }
@@ -335,9 +379,12 @@ async function submitDraft(){
   const d = S.draft, errs = validate(d), box = $("#formErr");
   if (errs.length){ box.innerHTML = errs.map(esc).join("<br>"); box.hidden = false; box.scrollIntoView({block:"nearest"}); return; }
   box.hidden = true; const btn = $("#submitBtn"); btn.disabled = true; btn.textContent = "Submitting…";
-  const lines = d.lines.map(l => { const o = {}; for (const c of TYPES[d.type].cols){ if (c.t === "calc" || c.t === "rate" || c.t === "chg") continue; o[c.k] = (c.t === "money" || c.t === "num") ? num(l[c.k]) : c.t === "check" ? !!l[c.k] : String(l[c.k] || (c.t === "activity" ? "Coaching" : "")).trim(); } return o; });
+  const lines = d.lines.map(l => { const o = {}; for (const c of colsFor(d.type, d.vat_invoice)){ if (DISPLAY_ONLY.includes(c.t)) continue; if (c.t === "vatrate"){ o[c.k] = l[c.k] == null || l[c.k] === "" ? 20 : num(l[c.k]); continue; } o[c.k] = (c.t === "money" || c.t === "num") ? num(l[c.k]) : c.t === "check" ? !!l[c.k] : String(l[c.k] || (c.t === "activity" ? "Coaching" : "")).trim(); } return o; });
   const p = {type:d.type, budget_area:d.budget_area, team:d.team, description:d.description,
-    invoice_number:d.type === "invoice" ? d.invoice_number : "", invoice_date:d.type === "invoice" ? d.invoice_date : "",
+    invoice_number:["invoice","supplier"].includes(d.type) ? d.invoice_number : "", invoice_date:["invoice","supplier"].includes(d.type) ? d.invoice_date : "",
+    supplier_name:d.supplier_name || "", supplier_email:d.supplier_email || "", due_date:d.type === "supplier" ? (d.due_date || "") : "",
+    vat_invoice:d.type === "supplier" && !!d.vat_invoice, supplier_vat_number:d.vat_invoice ? (d.supplier_vat_number || "") : "",
+    bank:d.type === "supplier" ? {account_name:d.bank_name, sort_code:d.bank_sort, account_number:d.bank_acct} : {},
     pay_period:d.type === "payroll" ? d.pay_period : "", lines, attachments:d.attachments};
   const {data, error} = await S.sb.rpc("submit_claim", {p, p_claim_id: d.editingId || null});
   if (error){ btn.disabled = false; btn.textContent = d.editingId ? "Resubmit claim" : "Submit claim"; box.textContent = errText(error, "The claim didn't save. Try again."); box.hidden = false; return; }
@@ -368,10 +415,12 @@ function stepsHtml(c){
   return `<ol class="track" aria-label="Progress">${steps.map((x,i) => `<li class="${x[1] ? "done" : i === next ? "next" : ""}"><b>${x[1] ? "✓ " : ""}${esc(x[0])}</b>${x[2] ? esc(x[2]) : (i === next ? "Waiting" : "")}</li>`).join("")}</ol>`;
 }
 function claimDetail(c, open){
-  const cols = TYPES[c.type].cols;
+  const cols = colsFor(c.type, c.vat_invoice);
   const cell = (k, l) => {
     if (k.t === "calc") return `<td class="num">${gbp(l.amount)}</td>`;
     if (k.t === "rate") return `<td class="num">${gbp(l.rate)}</td>`;
+    if (k.t === "vatcalc") return `<td class="num">${gbp(l.vat)}</td>`;
+    if (k.t === "vatrate") return `<td>${esc(l.vat_rate)}%</td>`;
     if (k.t === "chg") return `<td class="num">${l.chargeable_miles == null ? "–" : esc(l.chargeable_miles)}</td>`;
     if (k.t === "money") return `<td class="num">${gbp(l[k.k])}</td>`;
     if (k.t === "num") return `<td class="num">${esc(l[k.k])}</td>`;
@@ -382,17 +431,18 @@ function claimDetail(c, open){
   return `<details ${open ? "open" : ""}><summary>Claim details</summary>
     <div style="display:flex;flex-direction:column;gap:10px">
     <p style="margin:0">${esc(c.description)}</p>
-    <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "mileage" ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
-    <div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${["money","num","calc","rate","chg"].includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
+    <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "supplier" ? `${c.due_date ? `<span>Due ${fmtDate(c.due_date)}</span>` : ""}${c.supplier_email ? `<span>${esc(c.supplier_email)}</span>` : ""}${c.vat_invoice ? `<span>VAT no. ${esc(c.supplier_vat_number)} · Net ${gbp(c.net_total)} + VAT ${gbp(c.vat_total)}</span>` : `<span>Not a VAT invoice</span>`}` : ""}${c.type === "mileage" ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
+    <div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${NUMERIC_COLS.includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
     <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}</tr>`).join("")}</tbody></table></div>
     ${c.attachments && c.attachments.length ? `<div class="files">${filesHtml(c.attachments, false)}</div>` : ""}
     </div></details>`;
 }
+function payeeLabel(c){ return c.type === "supplier" ? `Pay ${c.supplier_name} · logged by ${personName(c.claimant)}` : personName(c.claimant); }
 function claimCard(c, actions, open){
   const st = STATUS[c.status] || STATUS.pending;
   return `<article class="claim">
     <div class="head"><span class="ref">${esc(c.ref)}</span><span class="pill ${st.cls}">${esc(st.label)}</span><span class="amt">${headline(c)}</span></div>
-    <div class="meta"><span><strong>${esc(personName(c.claimant))}</strong></span><span>${esc(TYPES[c.type].label)}</span><span>${esc(c.budget_area)}${c.team ? " · " + esc(c.team) : ""}</span><span>Submitted ${fmtDate(c.submitted_at)}${c.revision > 1 ? " · resubmitted " + fmtDate(c.updated_at) : ""}</span></div>
+    <div class="meta"><span><strong>${esc(payeeLabel(c))}</strong></span><span>${esc(TYPES[c.type].label)}</span><span>${esc(c.budget_area)}${c.team ? " · " + esc(c.team) : ""}</span><span>Submitted ${fmtDate(c.submitted_at)}${c.revision > 1 ? " · resubmitted " + fmtDate(c.updated_at) : ""}</span></div>
     ${stepsHtml(c)}
     ${c.status === "returned" ? `<div class="notice bad"><strong>${esc(personName(c.returned_by))} returned this claim:</strong> ${esc(c.returned_reason || "No reason given.")}</div>` : ""}
     ${c.status === "processed" && c.payment_ref ? `<div class="sub">Payment reference: ${esc(c.payment_ref)}</div>` : ""}
@@ -423,7 +473,7 @@ function viewApprove(){
   if (decided.length) h += `<div><h3 style="margin:12px 0 8px">Recently decided by you</h3><div class="tablebox"><table><thead><tr><th>Claim</th><th>Claimant</th><th>Your decision</th><th>Now</th><th class="num">Value</th></tr></thead><tbody>${decided.map(c => {
     const what = c.returned_by === S.me.id ? "Returned " + fmtDate(c.returned_at) : c.first_approver === S.me.id ? "1st approval " + fmtDate(c.first_approved_at) : "2nd approval " + fmtDate(c.second_approved_at);
     const st = STATUS[c.status];
-    return `<tr><td>${esc(c.ref)}</td><td>${esc(personName(c.claimant))}</td><td>${what}</td><td><span class="pill ${st.cls}">${esc(st.label)}</span></td><td class="num">${headline(c)}</td></tr>`;
+    return `<tr><td>${esc(c.ref)}</td><td>${esc(c.type === "supplier" ? c.supplier_name : personName(c.claimant))}</td><td>${what}</td><td><span class="pill ${st.cls}">${esc(st.label)}</span></td><td class="num">${headline(c)}</td></tr>`;
   }).join("")}</tbody></table></div></div>`;
   return h;
 }
@@ -445,21 +495,37 @@ function viewBooks(){
     h += `<div class="totals" style="justify-content:flex-start"><div style="align-items:flex-start"><small>Total approved</small><strong>${gbp(money)}</strong></div>${hrs ? `<div style="align-items:flex-start"><small>Payroll hours</small><strong>${fmtH(hrs)}</strong></div>` : ""}</div><p class="sub" style="margin:0">Payroll amounts are included in the total and are paid through wages.</p>`;
   }
   if (!list.length) return h + `<div class="empty">${f === "ready" ? "No approved claims are waiting. You'll get an email when one is ready." : "No claims here yet."}</div>`;
-  return h + `<div class="claims">${list.map(c => claimCard(c, c.status === "approved" ? `<div class="decide">${isBookkeeper() ? `<div class="row"><input id="payRef-${esc(c.id)}" placeholder="Payment reference (optional)" style="flex:1;min-width:180px"><button class="btn good" data-act="processed" data-id="${esc(c.id)}">Mark as paid</button></div>` : `<span class="sub">Only the bookkeeper can mark claims as paid.</span>`}</div>` : "")).join("")}</div>`;
+  return h + `<div class="claims">${list.map(c => claimCard(c, (isBookkeeper() && ["approved","processed"].includes(c.status) ? paymentBox(c) : "") + (c.status === "approved" ? `<div class="decide">${isBookkeeper() ? `<div class="row"><input id="payRef-${esc(c.id)}" placeholder="Payment reference (optional)" style="flex:1;min-width:180px"><button class="btn good" data-act="processed" data-id="${esc(c.id)}">Mark as paid</button></div>` : `<span class="sub">Only the bookkeeper can mark claims as paid.</span>`}</div>` : ""))).join("")}</div>`;
+}
+function payeeBank(c){ return c.type === "supplier" ? S.payees[c.id] : c.type === "payroll" ? null : S.banks[c.claimant]; }
+function paymentBox(c){
+  if (c.type === "payroll") return `<div class="notice">Pay through payroll: ${fmtH(c.hours)} for ${esc(personName(c.claimant))}.</div>`;
+  const b = payeeBank(c);
+  if (!b) return `<div class="notice warn">No bank details on file for ${esc(c.type === "supplier" ? c.supplier_name : personName(c.claimant))}. Ask them to add them in My account before paying.</div>`;
+  const changed = new Date(b.updated_at), recent = (Date.now() - changed) < 30 * 864e5 || changed > new Date(c.submitted_at);
+  const copy = (label, v) => `<span class="row" style="gap:6px"><span class="sub">${label}</span> <span class="copyable">${esc(v)}</span><button class="btn small" data-act="copy" data-text="${esc(v)}">Copy</button></span>`;
+  return `<div class="panel" style="padding:12px;gap:8px;background:var(--surface-2)">
+    <strong>Pay to</strong>
+    <div class="row" style="gap:8px 18px">${copy("Name", b.account_name)}${copy("Sort code", fmtSort(b.sort_code))}${copy("Account", b.account_number)}${copy("Reference", c.ref)}</div>
+    ${recent ? `<div class="notice warn" style="margin:0">These bank details were ${c.type === "supplier" ? "entered" : "changed"} on ${fmtDate(b.updated_at)}. Before paying, confirm them with ${esc(c.type === "supplier" ? c.supplier_name : personName(c.claimant))} by phone or in person, not by replying to an email.</div>` : ""}
+  </div>`;
 }
 function csvCell(v){ v = v == null ? "" : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 async function exportCsv(all){
   const f = all ? "all" : S.bkFilter, list = bkSet(f);
-  const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Colleagues carried","Claimable miles","Line amount","Claim total","Attachments"];
+  const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Colleagues carried","Claimable miles","Line amount","Claim total","Attachments","Payee","Supplier VAT no","Due date","VAT invoice","Line net","Line VAT rate","Line VAT","Claim net","Claim VAT"].concat(isBookkeeper() ? ["Pay to name","Sort code","Account number"] : []);
   const rows = [head];
   for (const c of list){
     const p = S.people[c.claimant] || {};
     for (const l of (c.lines || [])){
-      const detail = c.type === "mileage" ? `${l.from} to ${l.to}${l.ret ? " and return" : ""} – ${l.purpose}` : c.type === "expense" ? `${l.item}${l.supplier ? " (" + l.supplier + ")" : ""}` : l.session;
+      const detail = c.type === "supplier" ? l.item : c.type === "mileage" ? `${l.from} to ${l.to}${l.ret ? " and return" : ""} – ${l.purpose}` : c.type === "expense" ? `${l.item}${l.supplier ? " (" + l.supplier + ")" : ""}` : l.session;
       rows.push([c.ref, STATUS[c.status].label, TYPES[c.type].short, personName(c.claimant), p.email || "", c.budget_area, c.team, c.description, c.invoice_number, c.invoice_date || "", c.pay_period,
         isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), c.second_approver ? personName(c.second_approver) : "", isoDay(c.second_approved_at),
         isoDay(c.processed_at), c.payment_ref || "", l.date, detail, l.activity || "", l.hours || "", l.rate || c.mileage_rate || "",
-        c.type === "mileage" ? num(l.miles) * (l.ret ? 2 : 1) : "", c.type === "mileage" ? (l.passengers || 0) : "", c.type === "mileage" ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.type === "payroll" ? "" : c.total, (c.attachments || []).map(a => a.name).join("; ")]);
+        c.type === "mileage" ? num(l.miles) * (l.ret ? 2 : 1) : "", c.type === "mileage" ? (l.passengers || 0) : "", c.type === "mileage" ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.total, (c.attachments || []).map(a => a.name).join("; "),
+        c.type === "supplier" ? c.supplier_name : personName(c.claimant), c.supplier_vat_number || "", c.due_date || "", c.vat_invoice ? "Yes" : "No",
+        c.type === "supplier" ? (l.net ?? "") : "", c.vat_invoice ? (l.vat_rate ?? "") : "", c.vat_invoice ? (l.vat ?? "") : "", c.net_total ?? c.total, c.vat_total ?? 0]
+        .concat(isBookkeeper() ? (b => b ? [b.account_name, fmtSort(b.sort_code), b.account_number] : [c.type === "payroll" ? "Payroll" : "", "", ""])(payeeBank(c)) : []));
     }
   }
   const blob = new Blob(["﻿" + rows.map(r => r.map(csvCell).join(",")).join("\r\n")], {type:"text/csv;charset=utf-8"});
@@ -476,6 +542,7 @@ function viewPeople(){
       <label><input type="checkbox" data-r="active" ${p.active ? "checked" : ""}> Active</label>
       ${Object.entries(TYPES).map(([k,t]) => `<label><input type="checkbox" data-r="ap" value="${k}" ${(p.approver_types || []).includes(k) ? "checked" : ""}> Approves ${esc(t.short.toLowerCase())}</label>`).join("")}
       <label><input type="checkbox" data-r="books" ${p.is_bookkeeper ? "checked" : ""}> Bookkeeper</label>
+      <label><input type="checkbox" data-r="sup" ${p.can_log_suppliers ? "checked" : ""}> Logs supplier invoices</label>
       <label><input type="checkbox" data-r="admin" ${p.is_admin ? "checked" : ""}> Admin</label>
       <label>Coaching £/hr <input type="number" step="0.01" min="0" inputmode="decimal" data-r="crate" value="${p.coaching_rate == null ? "" : esc(p.coaching_rate)}" placeholder="${S.settings.coaching_rate == null ? "not set" : "club " + esc(S.settings.coaching_rate)}" style="width:7.5em"></label>
       <label>Umpiring £/hr <input type="number" step="0.01" min="0" inputmode="decimal" data-r="urate" value="${p.umpiring_rate == null ? "" : esc(p.umpiring_rate)}" placeholder="${S.settings.umpiring_rate == null ? "not set" : "club " + esc(S.settings.umpiring_rate)}" style="width:7.5em"></label>
@@ -499,7 +566,7 @@ async function savePerson(id){
   const q = s => r.querySelector(s);
   const args = {p_user:id, p_active:q('[data-r="active"]').checked, p_is_admin:q('[data-r="admin"]').checked, p_is_bookkeeper:q('[data-r="books"]').checked,
     p_approver_types:[...r.querySelectorAll('[data-r="ap"]:checked')].map(i => i.value),
-    p_coaching_rate: rateVal(q('[data-r="crate"]').value), p_umpiring_rate: rateVal(q('[data-r="urate"]').value)};
+    p_coaching_rate: rateVal(q('[data-r="crate"]').value), p_umpiring_rate: rateVal(q('[data-r="urate"]').value), p_can_log_suppliers: q('[data-r="sup"]').checked};
   const {error} = await S.sb.rpc("admin_update_user", args);
   if (error){ toast(errText(error)); return; }
   toast("Saved " + (S.people[id] && S.people[id].full_name || "")); await loadAll(false);
@@ -556,16 +623,21 @@ async function loadClaims(){
 }
 async function loadAll(first){
   const uid = S.user.id;
-  const [p, s, pp, n] = await Promise.all([
+  const [p, s, pp, n, bd, cp] = await Promise.all([
     S.sb.from("profiles").select("*").eq("id", uid).maybeSingle(),
     S.sb.from("settings").select("*").eq("id", 1).maybeSingle(),
     S.sb.from("profiles").select("*"),
-    S.sb.rpc("staff_names")
+    S.sb.rpc("staff_names"),
+    S.sb.from("bank_details").select("*"),
+    S.sb.from("claim_payees").select("*")
   ]);
   S.me = p.data || null;
   if (s.data) S.settings = s.data;
   S.people = Object.fromEntries((pp.data || []).map(x => [x.id, x]));
   S.names = Object.fromEntries((n.data || []).map(x => [x.id, x.full_name]));
+  S.banks = Object.fromEntries((bd.data || []).map(x => [x.user_id, x]));
+  S.payees = Object.fromEntries((cp.data || []).map(x => [x.claim_id, x]));
+  S.myBank = S.banks[uid] || null;
   await loadClaims();
   S.loaded = true;
   if (first){ S.tab = S.me && S.me.active ? homeTab() : "new"; S.draft = loadLocalDraft(); subscribe(); render(); }
@@ -631,12 +703,23 @@ document.addEventListener("click", async e => {
     case "download-data": {
       const mine = S.claims.filter(c => c.claimant === S.me.id);
       const {id, email, full_name, club_role, created_at, accepted_terms_at, coaching_rate, umpiring_rate} = S.me;
-      const data = {exported_at: new Date().toISOString(), account: {id, email, full_name, club_role, created_at, accepted_terms_at, coaching_rate, umpiring_rate}, claims: mine};
+      const data = {exported_at: new Date().toISOString(), account: {id, email, full_name, club_role, created_at, accepted_terms_at, coaching_rate, umpiring_rate}, bank_details: S.myBank, claims: mine};
       const blob = new Blob([JSON.stringify(data, null, 2)], {type: "application/json"});
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `my-claims-data-${today()}.json`;
       document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); break;
     }
     case "accept-terms": rpc("accept_terms", {}, "Thanks"); break;
+    case "coach-view": S.viewAsCoach = !S.viewAsCoach; S.tab = S.viewAsCoach ? "mine" : homeTab(); S.editingDetails = false; render(); window.scrollTo(0,0); break;
+    case "copy": { const t = b.dataset.text; try { await navigator.clipboard.writeText(t); toast("Copied " + t); } catch (e) { toast("Select the text and copy it"); } break; }
+    case "save-bank": {
+      const nm = $("#bName").value.trim(), sc = $("#bSort").value.replace(/\D/g, ""), an = $("#bAcct").value.replace(/\D/g, "");
+      if (!nm){ toast("Add the name on the account"); break; }
+      if (sc.length !== 6){ toast("A sort code has 6 digits, e.g. 12-34-56"); break; }
+      if (an.length !== 8){ toast("A UK account number has 8 digits"); break; }
+      const {error} = await S.sb.rpc("set_my_bank_details", {p_account_name: nm, p_sort_code: sc, p_account_number: an});
+      if (error){ toast(errText(error)); break; }
+      toast("Bank details saved"); await loadAll(false); render(); break;
+    }
     case "send-reset": { const p = S.people[id]; if (!p) break; b.disabled = true;
       const {error} = await S.sb.auth.resetPasswordForEmail(p.email, {redirectTo: location.origin + location.pathname});
       b.disabled = false; toast(error ? errText(error) : `Password reset link sent to ${p.email}`); break; }
@@ -659,7 +742,9 @@ document.addEventListener("click", async e => {
       S.editingDetails = false; toast("Details saved"); await loadAll(false); render(); break;
     }
     case "edit-claim": { const c = claim(); if (!c) break;
-      S.draft = {editingId:c.id, editingRef:c.ref, type:c.type, budget_area:c.budget_area, team:c.team || "", description:c.description, invoice_number:c.invoice_number || "", invoice_date:c.invoice_date || today(), pay_period:c.pay_period || "", lines:JSON.parse(JSON.stringify(c.lines || [])), attachments:(c.attachments || []).slice(), declare:false};
+      S.draft = {editingId:c.id, editingRef:c.ref, type:c.type, budget_area:c.budget_area, team:c.team || "", description:c.description, invoice_number:c.invoice_number || "", invoice_date:c.invoice_date || today(), pay_period:c.pay_period || "", lines:JSON.parse(JSON.stringify(c.lines || [])), attachments:(c.attachments || []).slice(), declare:false,
+        supplier_name:c.supplier_name || "", supplier_email:c.supplier_email || "", due_date:c.due_date || "", vat_invoice:!!c.vat_invoice, supplier_vat_number:c.supplier_vat_number || "",
+        bank_name:(S.payees[c.id] || {}).account_name || "", bank_sort:fmtSort((S.payees[c.id] || {}).sort_code), bank_acct:(S.payees[c.id] || {}).account_number || ""};
       S.tab = "new"; S.lastSubmitted = null; render(); window.scrollTo(0,0); break; }
     case "withdraw": S.confirmWithdraw = id; render(); break;
     case "withdraw-cancel": S.confirmWithdraw = null; render(); break;
@@ -682,7 +767,7 @@ document.addEventListener("click", async e => {
 function onField(e){
   const t = e.target, d = S.draft; if (!d || !t.closest("#claimForm")) return;
   const val = t.type === "checkbox" ? t.checked : t.value;
-  if (t.dataset.f) d[t.dataset.f] = val;
+  if (t.dataset.f) { d[t.dataset.f] = val; if (t.dataset.f === "vat_invoice" && e.type === "change"){ render(); return; } }
   else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ l[t.dataset.k] = val; recalc(); } }
   clearTimeout(onField._t); onField._t = setTimeout(saveLocalDraft, 400);
 }
