@@ -131,3 +131,12 @@ details[open] summary{margin-bottom:10px}
 .personrow .checks{display:flex;flex-wrap:wrap;gap:6px 14px}
 .personrow .checks label{flex-direction:row;align-items:center;gap:6px;font-weight:400;font-size:.9rem}
 @media (max-width:640px){.personrow{grid-template-columns:1fr}}
+/* privacy notice and terms pages */
+main.legal{max-width:760px;padding-block:28px 64px;display:block}
+.legal h2{margin-bottom:6px}
+.legal h3{margin:28px 0 8px;font-size:1.1rem}
+.legal p,.legal li{max-width:68ch}
+.legal ul{padding-left:1.2em;margin:8px 0}
+.legal li{margin:4px 0}
+.legal a,.sitefoot a,.notice a,.sub a{color:var(--turf)}
+.sitefoot{padding-block:0 32px;color:var(--muted);font-size:.88rem;display:flex;gap:16px;flex-wrap:wrap}

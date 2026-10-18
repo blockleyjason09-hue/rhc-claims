@@ -3,5 +3,9 @@
 window.RHC_CONFIG = {
   supabaseUrl: "https://pissizeruvxqobeiknom.supabase.co",
   supabaseAnonKey: "sb_publishable_HRRSXZtlCz71A0oeFZMGdQ_we8jRtCl",
-  clubName: "Reading Hockey Club"
+  clubName: "Reading Hockey Club",
+  // Shown in the privacy notice and terms of use:
+  contactEmail: "",      // e.g. "secretary@readinghockeyclub.co.uk"
+  clubAddress: "",       // the club's postal address
+  policyDate: "18 October 2026"
 };

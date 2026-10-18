@@ -14,7 +14,7 @@ const TYPES = {
   payroll:{label:"Coaching / umpiring payroll",short:"Payroll",blurb:"You're paid through club payroll. Log your hours for this pay period.",attach:false,
     cols:[{k:"date",l:"Date",t:"date"},{k:"activity",l:"Activity",t:"activity"},{k:"session",l:"Session / match",t:"text"},{k:"hours",l:"Hours",t:"num"},{k:"rate",l:"Rate £/hr",t:"rate"},{k:"_amt",l:"Amount",t:"calc"}]},
   mileage:{label:"Mileage",short:"Mileage",blurb:"You drove your own vehicle for club business.",attach:false,
-    cols:[{k:"date",l:"Date",t:"date"},{k:"from",l:"From",t:"text"},{k:"to",l:"To",t:"text"},{k:"purpose",l:"Purpose",t:"text"},{k:"miles",l:"Miles (one way)",t:"num"},{k:"ret",l:"Return",t:"check"},{k:"_amt",l:"Amount",t:"calc"}]}
+    cols:[{k:"date",l:"Date",t:"date"},{k:"from",l:"From",t:"text"},{k:"to",l:"To",t:"text"},{k:"purpose",l:"Purpose",t:"text"},{k:"miles",l:"Miles (one way)",t:"num"},{k:"ret",l:"Return",t:"check"},{k:"passengers",l:"Colleagues carried",t:"num",optional:true},{k:"chargeable_miles",l:"Claimable miles",t:"chg"},{k:"_amt",l:"Amount",t:"calc"}]}
 };
 const STATUS = {
   pending:{label:"Awaiting 1st approval",cls:"pending"},
@@ -73,6 +73,26 @@ function missingRates(d){
   const acts = [...new Set(d.lines.map(l => l.activity === "Umpiring" ? "Umpiring" : "Coaching"))];
   return acts.filter(a => hourlyRate(a) == null);
 }
+function mileageRules(src){
+  const s = src || S.settings || {};
+  return {rate: s.rate != null ? num(s.rate) : num(s.mileage_rate),
+    free: s.free_miles != null ? num(s.free_miles) : (s.mileage_free_miles == null ? 50 : num(s.mileage_free_miles)),
+    prate: s.passenger_rate != null ? num(s.passenger_rate) : (s.mileage_passenger_rate == null ? 0.10 : num(s.mileage_passenger_rate)),
+    basis: s.basis || s.mileage_free_basis || "journey"};
+}
+function mileageLines(lines){
+  const R = mileageRules(); let left = R.free;
+  return lines.map(l => {
+    const m = num(l.miles) * (l.ret ? 2 : 1);
+    let ch; if (R.basis === "claim"){ ch = Math.max(0, m - left); left = Math.max(0, left - m); } else ch = Math.max(0, m - R.free);
+    const pax = Math.max(0, Math.floor(num(l.passengers)));
+    return {m, ch, amt: Math.round(ch * (R.rate + pax * R.prate) * 100) / 100};
+  });
+}
+function rulesText(src){
+  const R = mileageRules(src), pence = v => Math.round(v * 100) + "p";
+  return `Mileage is paid at ${pence(R.rate)} a mile. ${R.free ? `The first ${R.free.toLocaleString("en-GB")} miles of each ${R.basis === "claim" ? "claim" : "journey (a return trip counts as one journey)"} aren't claimable. ` : ""}${R.prate ? `Add ${pence(R.prate)} a mile for each colleague you drive.` : ""}`;
+}
 function lineAmount(type, l, rate){
   if (type === "expense") return num(l.amount);
   if (type === "invoice" || type === "payroll") return num(l.hours) * num(hourlyRate(l.activity));
@@ -81,6 +101,7 @@ function lineAmount(type, l, rate){
 }
 function totals(type, lines, rate){
   let amount = 0, hours = 0, miles = 0;
+  if (type === "mileage"){ const ml = mileageLines(lines); let ch = 0; for (const x of ml){ amount += x.amt; miles += x.m; ch += x.ch; } return {amount: Math.round(amount * 100) / 100, hours, miles, chargeable: ch}; }
   for (const l of lines){ amount += lineAmount(type, l, rate); hours += num(l.hours); miles += num(l.miles) * (l.ret ? 2 : 1); }
   return {amount: Math.round(amount * 100) / 100, hours, miles};
 }
@@ -99,7 +120,7 @@ function renderHeader(){
   const list = tabsList();
   if (list.length && !list.some(t => t.id === S.tab)) S.tab = list[0].id;
   $("#tabs").innerHTML = list.map(t => `<button role="tab" data-act="tab" data-tab="${t.id}" aria-selected="${S.tab === t.id}">${esc(t.l)}${t.n ? `<span class="count">${t.n}</span>` : ""}</button>`).join("");
-  $("#who").innerHTML = S.user ? `<span>${esc((S.me && S.me.full_name) || S.user.email)}</span>${S.me && S.me.active ? myRoles().map(r => `<span class="role">${esc(r)}</span>`).join("") : ""}<button class="signout" data-act="signout">Sign out</button>` : "";
+  $("#who").innerHTML = S.user ? `<span>${esc((S.me && S.me.full_name) || S.user.email)}</span>${S.me && S.me.active ? myRoles().map(r => `<span class="role">${esc(r)}</span>`).join("") : ""}${S.me && S.me.active ? `<button class="signout" data-act="edit-details">My account</button>` : ""}<button class="signout" data-act="signout">Sign out</button>` : "";
 }
 function render(){
   renderHeader();
@@ -110,7 +131,7 @@ function render(){
   if (!S.me) { m.innerHTML = `<div class="panel"><h2>Account problem</h2><p class="lede">Your login worked, but your club profile is missing. Ask the club admin to check the setup.</p></div>`; return; }
   if (!S.me.active) { m.innerHTML = viewInactive(); return; }
   const v = {new:viewNew, mine:viewMine, approve:viewApprove, books:viewBooks, people:viewPeople, settings:viewSettings}[S.tab] || viewNew;
-  m.innerHTML = v();
+  m.innerHTML = (S.me.accepted_terms_at ? "" : `<div class="notice warn row"><span style="flex:1">Please read the <a href="privacy.html" target="_blank" rel="noopener">privacy notice</a> and <a href="terms.html" target="_blank" rel="noopener">terms of use</a> for the claims system.</span><button class="btn small primary" data-act="accept-terms">I've read and accept them</button></div>`) + v();
   if (S.tab === "new") recalc();
 }
 /* Refresh after live changes, without wiping a form someone is filling in */
@@ -139,6 +160,7 @@ function viewAuth(v){
       <label>Email<input id="aEmail" type="email" autocomplete="email" required></label>
       <label>Club role <span class="hint">e.g. U14 girls coach, umpire, treasurer</span><input id="aRole"></label>
       <label>Password <span class="hint">At least 8 characters</span><input id="aPass" type="password" autocomplete="new-password" minlength="8" required></label>
+      <label style="flex-direction:row;align-items:flex-start;gap:10px;font-weight:400"><input type="checkbox" id="aTerms"> <span>I've read the <a href="privacy.html" target="_blank" rel="noopener">privacy notice</a> and agree to the <a href="terms.html" target="_blank" rel="noopener">terms of use</a>.</span></label>
       ${err}<button class="btn primary" type="submit">Create account</button>
     </form>
     <button class="link" data-act="auth" data-v="signin">I already have an account</button>`;
@@ -168,8 +190,9 @@ async function handleAuth(form){
       const name = $("#aName").value.trim();
       if (!name) throw new Error("Add your full name.");
       if ((pass || "").length < 8) throw new Error("Use a password of at least 8 characters.");
+      if (!$("#aTerms").checked) throw new Error("Tick the box to confirm you've read the privacy notice and terms.");
       const {data, error} = await S.sb.auth.signUp({email: email.trim(), password: pass,
-        options: {data: {full_name: name, club_role: $("#aRole").value.trim()}, emailRedirectTo: location.origin + location.pathname}});
+        options: {data: {full_name: name, club_role: $("#aRole").value.trim(), accepted_terms: true}, emailRedirectTo: location.origin + location.pathname}});
       if (error) throw error;
       if (!data.session){ S.authView = "signin"; S.authMsg = "Check your email and click the confirmation link, then sign in here."; render(); }
     } else if (form.dataset.form === "forgot"){
@@ -198,12 +221,28 @@ function viewInactive(){
 function detailsCard(){
   const me = S.me;
   return `<section class="panel">
-    <div><h2>Your details</h2><p class="lede">These appear on your claims so approvers and the bookkeeper know who to pay. Your login email is ${esc(me.email)}.</p></div>
+    <div><h2>My account</h2><p class="lede">Your name appears on your claims so approvers and the bookkeeper know who to pay.</p></div>
     <div class="grid">
       <label>Full name<input id="pName" value="${esc(me.full_name)}" autocomplete="name"></label>
       <label>Club role<input id="pRole" value="${esc(me.club_role)}"></label>
     </div>
-    <div class="row end"><button class="btn" data-act="cancel-details">Cancel</button><button class="btn primary" data-act="save-details">Save my details</button></div>
+    <div class="row end"><button class="btn primary" data-act="save-details">Save details</button></div>
+  </section>
+  <section class="panel">
+    <div><h3>Login email</h3><p class="sub" style="margin:4px 0 0">Currently <strong>${esc(S.user.email || me.email)}</strong>. We'll send a confirmation link to the new address${S.user.new_email ? `. A change to ${esc(S.user.new_email)} is waiting for confirmation` : ""}.</p></div>
+    <div class="row"><input id="pEmail" type="email" autocomplete="email" placeholder="New email address" style="flex:1;min-width:200px"><button class="btn" data-act="change-email">Change email</button></div>
+  </section>
+  <section class="panel">
+    <h3>Password</h3>
+    <div class="grid">
+      <label>New password <span class="hint">At least 8 characters</span><input id="pPass" type="password" autocomplete="new-password"></label>
+      <label>Confirm new password<input id="pPass2" type="password" autocomplete="new-password"></label>
+    </div>
+    <div class="row end"><button class="btn" data-act="change-password">Change password</button></div>
+  </section>
+  <section class="panel">
+    <div><h3>Your data</h3><p class="sub" style="margin:4px 0 0">Download a copy of your account details and every claim you've submitted. Read the <a href="privacy.html" target="_blank" rel="noopener">privacy notice</a> and <a href="terms.html" target="_blank" rel="noopener">terms of use</a>. To have your account closed, contact the club admin.</p></div>
+    <div class="row"><button class="btn" data-act="download-data">Download my data</button><button class="btn" data-act="cancel-details">Back to my claims</button></div>
   </section>`;
 }
 
@@ -223,6 +262,7 @@ function viewNew(){
   h += `<section class="panel" id="claimForm">
     <div class="row"><h2 style="flex:1">${esc(T.label)}</h2><span class="sub">Paying ${esc(S.me.full_name)}</span></div>
     ${missingRates(d).length ? `<div class="notice warn">Your ${esc(missingRates(d).map(a => a.toLowerCase()).join(" and "))} rate hasn't been set yet, so this claim can't be submitted. Ask the club admin to add it.</div>` : ["invoice","payroll"].includes(d.type) ? `<div class="notice">Your hourly rates are set by the club: coaching ${hourlyRate("Coaching") != null ? gbp(hourlyRate("Coaching")) : "not set"}, umpiring ${hourlyRate("Umpiring") != null ? gbp(hourlyRate("Umpiring")) : "not set"}.</div>` : ""}
+    ${d.type === "mileage" && rate != null ? `<div class="notice">${esc(rulesText())}</div>` : ""}
     ${d.type === "mileage" && rate == null ? `<div class="notice warn">The club mileage rate hasn't been set yet, so mileage claims can't be submitted. The club admin sets it in Settings.</div>` : ""}
     <div class="grid">
       <label>Budget area<select id="fArea" data-f="budget_area"><option value="">Choose…</option>${areas.map(a => `<option ${d.budget_area === a ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></label>
@@ -233,7 +273,7 @@ function viewNew(){
     <label>What is this claim for?<textarea id="fDesc" data-f="description" placeholder="${d.type === "mileage" ? "e.g. Driving to the U14 regional tournament" : d.type === "expense" ? "e.g. First-aid kit restock for match day" : "e.g. U14 girls Sunday sessions, October"}">${esc(d.description)}</textarea></label>
     <div>
       <h3 style="margin-bottom:8px">${d.type === "mileage" ? "Journeys" : d.type === "expense" ? "Items" : "Hours"}</h3>
-      <div class="tablebox"><table class="lines"><thead><tr>${T.cols.map(c => `<th class="${["calc","money","num","rate"].includes(c.t) ? "num" : ""}">${esc(c.l)}</th>`).join("")}<th></th></tr></thead>
+      <div class="tablebox"><table class="lines"><thead><tr>${T.cols.map(c => `<th class="${["calc","money","num","rate","chg"].includes(c.t) ? "num" : ""}">${esc(c.l)}</th>`).join("")}<th></th></tr></thead>
       <tbody>${d.lines.map((l,i) => `<tr>${T.cols.map(c => lineCell(c,l,i)).join("")}<td><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></td></tr>`).join("")}</tbody></table></div>
       <div class="row" style="margin-top:10px"><button class="btn small" data-act="add-line">+ Add ${d.type === "mileage" ? "journey" : d.type === "expense" ? "item" : "session"}</button></div>
     </div>
@@ -255,7 +295,7 @@ function inProgressHint(){
 }
 function lineCell(c, l, i){
   const id = `ln-${i}-${c.k}`, v = l[c.k] == null ? "" : l[c.k];
-  if (c.t === "calc" || c.t === "rate") return `<td class="num calc" id="${id}">–</td>`;
+  if (c.t === "calc" || c.t === "rate" || c.t === "chg") return `<td class="num calc" id="${id}">–</td>`;
   if (c.t === "check") return `<td style="text-align:center;padding-top:12px"><input type="checkbox" id="${id}" data-line="${i}" data-k="${c.k}" ${v ? "checked" : ""} aria-label="Return journey"></td>`;
   if (c.t === "activity") return `<td><select id="${id}" data-line="${i}" data-k="${c.k}" aria-label="Activity"><option ${v !== "Umpiring" ? "selected" : ""}>Coaching</option><option ${v === "Umpiring" ? "selected" : ""}>Umpiring</option></select></td>`;
   const type = c.t === "date" ? "date" : (c.t === "text" ? "text" : "number");
@@ -269,10 +309,11 @@ function filesHtml(list, editable){
 function recalc(){
   const d = S.draft; if (!d || !d.type) return; const el = $("#totals"); if (!el) return;
   const rate = S.settings.mileage_rate;
-  d.lines.forEach((l,i) => { const c = $(`#ln-${i}-_amt`); if (c) c.textContent = gbp(lineAmount(d.type, l, rate)); const r = $(`#ln-${i}-rate`); if (r){ const v = hourlyRate(l.activity); r.textContent = v == null ? "not set" : gbp(v); } });
+  const ml = d.type === "mileage" ? mileageLines(d.lines) : null;
+  d.lines.forEach((l,i) => { const c = $(`#ln-${i}-_amt`); if (c) c.textContent = gbp(ml ? ml[i].amt : lineAmount(d.type, l, rate)); const cm = $(`#ln-${i}-chargeable_miles`); if (cm && ml) cm.textContent = ml[i].ch.toLocaleString("en-GB"); const r = $(`#ln-${i}-rate`); if (r){ const v = hourlyRate(l.activity); r.textContent = v == null ? "not set" : gbp(v); } });
   const t = totals(d.type, d.lines, rate);
   let out = "";
-  if (d.type === "mileage") out += `<div><small>Miles</small><strong>${t.miles.toLocaleString("en-GB")}</strong></div><div><small>Rate</small><strong>${rate != null ? gbp(rate) + "/mi" : "–"}</strong></div>`;
+  if (d.type === "mileage") out += `<div><small>Miles driven</small><strong>${t.miles.toLocaleString("en-GB")}</strong></div><div><small>Claimable miles</small><strong>${t.chargeable.toLocaleString("en-GB")}</strong></div>`;
   if (d.type === "invoice" || d.type === "payroll") out += `<div><small>Total hours</small><strong>${fmtH(t.hours)}</strong></div>`;
   out += `<div><small>Total claimed</small><strong>${gbp(t.amount)}</strong></div>`;
   el.innerHTML = out;
@@ -284,7 +325,7 @@ function validate(d){
   if (d.type === "invoice" && !d.invoice_number.trim()) errs.push("Add your invoice number.");
   if (d.type === "mileage" && S.settings.mileage_rate == null) errs.push("The club mileage rate isn't set yet.");
   for (const a of missingRates(d)) errs.push(`Your ${a.toLowerCase()} rate hasn't been set yet. Ask the club admin to add it.`);
-  const need = T.cols.filter(c => !["calc","check","rate"].includes(c.t) && !c.optional).map(c => c.k);
+  const need = T.cols.filter(c => !["calc","check","rate","chg"].includes(c.t) && !c.optional).map(c => c.k);
   d.lines.forEach((l,i) => { for (const k of need){ const v = l[k]; if (v == null || String(v).trim() === "" || (["amount","hours","miles","rate"].includes(k) && num(v) <= 0)){ errs.push(`Line ${i+1}: fill in ${T.cols.find(c => c.k === k).l.toLowerCase()}.`); break; } } });
   if (T.attach && !d.attachments.length) errs.push(d.type === "invoice" ? "Upload your invoice." : "Upload at least one receipt.");
   if (!d.declare) errs.push("Tick the confirmation box.");
@@ -294,7 +335,7 @@ async function submitDraft(){
   const d = S.draft, errs = validate(d), box = $("#formErr");
   if (errs.length){ box.innerHTML = errs.map(esc).join("<br>"); box.hidden = false; box.scrollIntoView({block:"nearest"}); return; }
   box.hidden = true; const btn = $("#submitBtn"); btn.disabled = true; btn.textContent = "Submitting…";
-  const lines = d.lines.map(l => { const o = {}; for (const c of TYPES[d.type].cols){ if (c.t === "calc" || c.t === "rate") continue; o[c.k] = (c.t === "money" || c.t === "num") ? num(l[c.k]) : c.t === "check" ? !!l[c.k] : String(l[c.k] || (c.t === "activity" ? "Coaching" : "")).trim(); } return o; });
+  const lines = d.lines.map(l => { const o = {}; for (const c of TYPES[d.type].cols){ if (c.t === "calc" || c.t === "rate" || c.t === "chg") continue; o[c.k] = (c.t === "money" || c.t === "num") ? num(l[c.k]) : c.t === "check" ? !!l[c.k] : String(l[c.k] || (c.t === "activity" ? "Coaching" : "")).trim(); } return o; });
   const p = {type:d.type, budget_area:d.budget_area, team:d.team, description:d.description,
     invoice_number:d.type === "invoice" ? d.invoice_number : "", invoice_date:d.type === "invoice" ? d.invoice_date : "",
     pay_period:d.type === "payroll" ? d.pay_period : "", lines, attachments:d.attachments};
@@ -331,6 +372,7 @@ function claimDetail(c, open){
   const cell = (k, l) => {
     if (k.t === "calc") return `<td class="num">${gbp(l.amount)}</td>`;
     if (k.t === "rate") return `<td class="num">${gbp(l.rate)}</td>`;
+    if (k.t === "chg") return `<td class="num">${l.chargeable_miles == null ? "–" : esc(l.chargeable_miles)}</td>`;
     if (k.t === "money") return `<td class="num">${gbp(l[k.k])}</td>`;
     if (k.t === "num") return `<td class="num">${esc(l[k.k])}</td>`;
     if (k.t === "check") return `<td>${l[k.k] ? "Yes" : "No"}</td>`;
@@ -340,8 +382,8 @@ function claimDetail(c, open){
   return `<details ${open ? "open" : ""}><summary>Claim details</summary>
     <div style="display:flex;flex-direction:column;gap:10px">
     <p style="margin:0">${esc(c.description)}</p>
-    <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "mileage" ? `<span>Rate ${gbp(c.mileage_rate)}/mile</span>` : ""}</div>
-    <div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${["money","num","calc","rate"].includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
+    <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "mileage" ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
+    <div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${["money","num","calc","rate","chg"].includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
     <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}</tr>`).join("")}</tbody></table></div>
     ${c.attachments && c.attachments.length ? `<div class="files">${filesHtml(c.attachments, false)}</div>` : ""}
     </div></details>`;
@@ -362,7 +404,7 @@ function claimCard(c, actions, open){
 /* ---------- my claims ---------- */
 function viewMine(){
   const mine = S.claims.filter(c => c.claimant === S.me.id);
-  const head = `<div class="row"><div style="flex:1"><h2>My claims</h2><p class="lede">Everything you've submitted, newest first. You can see each approval as it happens.</p></div><button class="btn small" data-act="edit-details">My details</button></div>`;
+  const head = `<div class="row"><div style="flex:1"><h2>My claims</h2><p class="lede">Everything you've submitted, newest first. You can see each approval as it happens.</p></div><button class="btn small" data-act="edit-details">My account</button></div>`;
   if (S.editingDetails) return head + detailsCard();
   if (!mine.length) return head + `<div class="empty">You haven't submitted any claims yet.<br><br><button class="btn primary" data-act="tab" data-tab="new">Start a claim</button></div>`;
   return head + `<div class="claims">${mine.map(c => {
@@ -408,7 +450,7 @@ function viewBooks(){
 function csvCell(v){ v = v == null ? "" : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 async function exportCsv(all){
   const f = all ? "all" : S.bkFilter, list = bkSet(f);
-  const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Line amount","Claim total","Attachments"];
+  const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Colleagues carried","Claimable miles","Line amount","Claim total","Attachments"];
   const rows = [head];
   for (const c of list){
     const p = S.people[c.claimant] || {};
@@ -417,7 +459,7 @@ async function exportCsv(all){
       rows.push([c.ref, STATUS[c.status].label, TYPES[c.type].short, personName(c.claimant), p.email || "", c.budget_area, c.team, c.description, c.invoice_number, c.invoice_date || "", c.pay_period,
         isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), c.second_approver ? personName(c.second_approver) : "", isoDay(c.second_approved_at),
         isoDay(c.processed_at), c.payment_ref || "", l.date, detail, l.activity || "", l.hours || "", l.rate || c.mileage_rate || "",
-        c.type === "mileage" ? num(l.miles) * (l.ret ? 2 : 1) : "", l.amount || 0, c.type === "payroll" ? "" : c.total, (c.attachments || []).map(a => a.name).join("; ")]);
+        c.type === "mileage" ? num(l.miles) * (l.ret ? 2 : 1) : "", c.type === "mileage" ? (l.passengers || 0) : "", c.type === "mileage" ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.type === "payroll" ? "" : c.total, (c.attachments || []).map(a => a.name).join("; ")]);
     }
   }
   const blob = new Blob(["﻿" + rows.map(r => r.map(csvCell).join(",")).join("\r\n")], {type:"text/csv;charset=utf-8"});
@@ -438,7 +480,12 @@ function viewPeople(){
       <label>Coaching £/hr <input type="number" step="0.01" min="0" inputmode="decimal" data-r="crate" value="${p.coaching_rate == null ? "" : esc(p.coaching_rate)}" placeholder="${S.settings.coaching_rate == null ? "not set" : "club " + esc(S.settings.coaching_rate)}" style="width:7.5em"></label>
       <label>Umpiring £/hr <input type="number" step="0.01" min="0" inputmode="decimal" data-r="urate" value="${p.umpiring_rate == null ? "" : esc(p.umpiring_rate)}" placeholder="${S.settings.umpiring_rate == null ? "not set" : "club " + esc(S.settings.umpiring_rate)}" style="width:7.5em"></label>
     </div>
-    <button class="btn small primary" data-act="save-person" data-id="${esc(p.id)}">Save</button>
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:stretch">
+      <button class="btn small primary" data-act="save-person" data-id="${esc(p.id)}">Save</button>
+      <button class="btn small" data-act="send-reset" data-id="${esc(p.id)}">Send password reset</button>
+      <button class="btn small" data-act="email-edit" data-id="${esc(p.id)}">Change email</button>
+    </div>
+    ${S.emailEdit === p.id ? `<div class="row" style="grid-column:1/-1"><input id="newEmail-${esc(p.id)}" type="email" placeholder="New email for ${esc(p.full_name || "this person")}" style="flex:1;min-width:200px"><button class="btn small" data-act="email-cancel">Cancel</button><button class="btn small primary" data-act="email-save" data-id="${esc(p.id)}">Save new email</button></div>` : ""}
   </div>`;
   const counts = Object.keys(TYPES).map(k => [k, ppl.filter(p => p.active && (p.approver_types || []).includes(k)).length]);
   const thin = counts.filter(([,n]) => n < 3).map(([k]) => TYPES[k].short.toLowerCase());
@@ -463,6 +510,9 @@ function viewSettings(){
   return `<div><h2>Settings</h2><p class="lede">Club-wide settings for claims.</p></div>
   <section class="panel"><div class="grid">
     <label>Club mileage rate (£ per mile)<input id="sRate" type="number" step="0.01" min="0" inputmode="decimal" value="${S.settings.mileage_rate == null ? "" : esc(S.settings.mileage_rate)}" placeholder="e.g. 0.30"></label>
+    <label>Free miles not claimable<input id="sFree" type="number" step="1" min="0" inputmode="numeric" value="${S.settings.mileage_free_miles == null ? 50 : esc(S.settings.mileage_free_miles)}"></label>
+    <label>Free miles apply<select id="sBasis"><option value="journey" ${S.settings.mileage_free_basis !== "claim" ? "selected" : ""}>Per journey (a return trip counts as one)</option><option value="claim" ${S.settings.mileage_free_basis === "claim" ? "selected" : ""}>Per claim</option></select></label>
+    <label>Extra per colleague carried (£ per mile)<input id="sPax" type="number" step="0.01" min="0" inputmode="decimal" value="${S.settings.mileage_passenger_rate == null ? "0.10" : esc(S.settings.mileage_passenger_rate)}"></label>
     <label>Club coaching rate (£ per hour) <span class="hint">Used for anyone without their own rate in People</span><input id="sCRate" type="number" step="0.01" min="0" inputmode="decimal" value="${S.settings.coaching_rate == null ? "" : esc(S.settings.coaching_rate)}"></label>
     <label>Club umpiring rate (£ per hour) <span class="hint">Used for anyone without their own rate in People</span><input id="sURate" type="number" step="0.01" min="0" inputmode="decimal" value="${S.settings.umpiring_rate == null ? "" : esc(S.settings.umpiring_rate)}"></label>
     <label>Budget areas <span class="hint">One per line</span><textarea id="sAreas" rows="7">${esc((S.settings.budget_areas || DEFAULT_AREAS).join("\n"))}</textarea></label>
@@ -563,6 +613,44 @@ document.addEventListener("click", async e => {
     case "another": S.lastSubmitted = null; S.draft = blankDraft(); render(); break;
     case "edit-details": S.tab = "mine"; S.editingDetails = true; render(); break;
     case "cancel-details": S.editingDetails = false; render(); break;
+    case "change-email": {
+      const email = $("#pEmail").value.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ toast("Enter a valid email address"); break; }
+      const {error} = await S.sb.auth.updateUser({email}, {emailRedirectTo: location.origin + location.pathname});
+      if (error){ toast(errText(error)); break; }
+      toast("Check your inbox to confirm the new email. You may need to confirm from your old address too."); break;
+    }
+    case "change-password": {
+      const a1 = $("#pPass").value, a2 = $("#pPass2").value;
+      if (a1.length < 8){ toast("Use a password of at least 8 characters"); break; }
+      if (a1 !== a2){ toast("The two passwords don't match"); break; }
+      const {error} = await S.sb.auth.updateUser({password: a1});
+      if (error){ toast(errText(error)); break; }
+      $("#pPass").value = $("#pPass2").value = ""; toast("Password changed"); break;
+    }
+    case "download-data": {
+      const mine = S.claims.filter(c => c.claimant === S.me.id);
+      const {id, email, full_name, club_role, created_at, accepted_terms_at, coaching_rate, umpiring_rate} = S.me;
+      const data = {exported_at: new Date().toISOString(), account: {id, email, full_name, club_role, created_at, accepted_terms_at, coaching_rate, umpiring_rate}, claims: mine};
+      const blob = new Blob([JSON.stringify(data, null, 2)], {type: "application/json"});
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `my-claims-data-${today()}.json`;
+      document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); break;
+    }
+    case "accept-terms": rpc("accept_terms", {}, "Thanks"); break;
+    case "send-reset": { const p = S.people[id]; if (!p) break; b.disabled = true;
+      const {error} = await S.sb.auth.resetPasswordForEmail(p.email, {redirectTo: location.origin + location.pathname});
+      b.disabled = false; toast(error ? errText(error) : `Password reset link sent to ${p.email}`); break; }
+    case "email-edit": S.emailEdit = id; render(); { const t = $("#newEmail-" + CSS.escape(id)); if (t) t.focus(); } break;
+    case "email-cancel": S.emailEdit = null; render(); break;
+    case "email-save": {
+      const t = $("#newEmail-" + CSS.escape(id)), email = t ? t.value.trim() : "";
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){ toast("Enter a valid email address"); break; }
+      b.disabled = true;
+      const {data, error} = await S.sb.functions.invoke("admin-users", {body: {action: "change_email", user_id: id, email}});
+      b.disabled = false;
+      if (error){ let msg = errText(error); try { const j = await error.context.json(); if (j && j.error) msg = j.error; } catch (e) {} toast(msg); break; }
+      S.emailEdit = null; toast("Email changed. They can sign in with the new address straight away."); await loadAll(false); render(); break;
+    }
     case "save-details": {
       const full_name = $("#pName").value.trim(), club_role = $("#pRole").value.trim();
       if (!full_name){ toast("Add your name"); break; }
@@ -588,7 +676,7 @@ document.addEventListener("click", async e => {
     case "export-all": exportCsv(true); break;
     case "save-person": savePerson(id); break;
     case "save-settings": { const rate = $("#sRate").value.trim();
-      rpc("admin_update_settings", {p_mileage_rate: rate === "" ? null : num(rate), p_budget_areas: $("#sAreas").value.split("\n").map(x => x.trim()).filter(Boolean), p_coaching_rate: rateVal($("#sCRate").value), p_umpiring_rate: rateVal($("#sURate").value)}, "Settings saved"); break; }
+      rpc("admin_update_settings", {p_mileage_rate: rate === "" ? null : num(rate), p_budget_areas: $("#sAreas").value.split("\n").map(x => x.trim()).filter(Boolean), p_coaching_rate: rateVal($("#sCRate").value), p_umpiring_rate: rateVal($("#sURate").value), p_mileage_free_miles: num($("#sFree").value), p_mileage_passenger_rate: num($("#sPax").value), p_mileage_free_basis: $("#sBasis").value}, "Settings saved"); break; }
   }
 });
 function onField(e){
