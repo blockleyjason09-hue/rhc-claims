@@ -35,7 +35,7 @@ const STATUS = {
 
 const S = {sb:null,user:null,me:null,settings:{mileage_rate:null,budget_areas:DEFAULT_AREAS},claims:[],people:{},names:{},banks:{},payees:{},myBank:null,viewAsCoach:false,
   tab:null,draft:null,authView:"signin",authMsg:"",recovery:false,lastSubmitted:null,decideOpen:null,confirmWithdraw:null,
-  bkFilter:"ready",editingDetails:false,channel:null,loaded:false};
+  bkFilter:"ready",bk:{month:"",type:"",area:"",q:"",sort:"new"},editingDetails:false,channel:null,loaded:false};
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -640,16 +640,54 @@ function decideBox(c){
 
 /* ---------- bookkeeper ---------- */
 function bkSet(f){ return f === "ready" ? readyToPay() : f === "processed" ? S.claims.filter(c => c.status === "processed") : S.claims; }
+const BK_SORTS = [["new","Newest first"],["old","Oldest first"],["high","Amount: high to low"],["low","Amount: low to high"],["name","Claimant / payee A–Z"],["type","Claim type"]];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function claimMonth(c){
+  if (c.type === "payroll" && /^\d{4}-\d{2}/.test(c.pay_period || "")) return c.pay_period.slice(0, 7);
+  if ((c.type === "invoice" || c.type === "supplier") && c.invoice_date) return String(c.invoice_date).slice(0, 7);
+  return String(c.submitted_at || "").slice(0, 7);
+}
+const monthLabel = m => m ? `${MONTHS.at(Number(m.slice(5, 7)) - 1)} ${m.slice(0, 4)}` : "";
+const payeeName = c => c.type === "supplier" ? c.supplier_name : personName(c.claimant);
+function bkFiltered(){
+  const F = S.bk, q = (F.q || "").trim().toLowerCase();
+  let list = bkSet(S.bkFilter).filter(c => (!F.month || claimMonth(c) === F.month) && (!F.type || c.type === F.type) && (!F.area || c.budget_area === F.area)
+    && (!q || [payeeName(c), personName(c.claimant), c.ref, c.description, c.team, c.invoice_number].join(" ").toLowerCase().includes(q)));
+  const by = {new: (a, b) => String(b.submitted_at).localeCompare(String(a.submitted_at)), old: (a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)),
+    high: (a, b) => num(b.total) - num(a.total), low: (a, b) => num(a.total) - num(b.total),
+    name: (a, b) => String(payeeName(a)).localeCompare(String(payeeName(b))), type: (a, b) => TYPES[a.type].label.localeCompare(TYPES[b.type].label) || String(b.submitted_at).localeCompare(String(a.submitted_at))}[F.sort] || null;
+  return by ? list.slice().sort(by) : list;
+}
+const bkActive = () => !!(S.bk.month || S.bk.type || S.bk.area || (S.bk.q || "").trim());
 function viewBooks(){
-  const f = S.bkFilter, list = bkSet(f);
-  let h = `<div class="row"><div style="flex:1"><h2>Bookkeeper</h2><p class="lede">Claims with both approvals land here. Pay them, then mark each one as processed with your payment reference.</p></div>
-    <div class="row">${f !== "all" && list.length ? `<button class="btn" data-act="export">Export ${f === "ready" ? "ready to pay" : "processed"} (CSV)</button>` : ""}<button class="btn primary" data-act="export-all" ${S.claims.length ? "" : "disabled"}>Export all claims (CSV)</button></div></div>
-    <div class="seg" role="group" aria-label="Filter">${[["ready","Ready to pay"],["processed","Paid"],["all","All claims"]].map(([k,l]) => `<button data-act="bk" data-f="${k}" aria-pressed="${f === k}">${l} (${bkSet(k).length})</button>`).join("")}</div>`;
-  if (f === "ready" && list.length){
-    const money = list.reduce((s,c) => s + num(c.total), 0), hrs = list.filter(c => c.type === "payroll").reduce((s,c) => s + num(c.hours), 0);
-    h += `<div class="totals" style="justify-content:flex-start"><div style="align-items:flex-start"><small>Total approved</small><strong>${gbp(money)}</strong></div>${hrs ? `<div style="align-items:flex-start"><small>Payroll hours</small><strong>${fmtH(hrs)}</strong></div>` : ""}</div><p class="sub" style="margin:0">Payroll amounts are included in the total and are paid through wages.</p>`;
+  const f = S.bkFilter, F = S.bk, base = bkSet(f), list = bkFiltered();
+  const months = [...new Set(S.claims.map(claimMonth).filter(Boolean))].sort().reverse();
+  const areas = [...new Set(S.claims.map(c => c.budget_area).filter(Boolean))].sort();
+  const sel = (k, label, opts) => `<label>${label}<select data-bk-k="${k}" id="bk-${k}"><option value="">All</option>${opts.map(([v, l]) => `<option value="${esc(v)}" ${F[k] === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`;
+  let h = `<div class="row"><div style="flex:1"><h2>Bookkeeper</h2><p class="lede">Claims with both approvals land here. Pay them, then mark each one as paid with your payment reference.</p></div>
+    <div class="row"><button class="btn primary" data-act="export-all" ${S.claims.length ? "" : "disabled"}>Export all claims (CSV)</button></div></div>
+    <div class="seg" role="group" aria-label="Status">${[["ready","Ready to pay"],["processed","Paid"],["all","All claims"]].map(([k,l]) => `<button data-act="bk" data-f="${k}" aria-pressed="${f === k}">${l} (${bkSet(k).length})</button>`).join("")}</div>
+    <section class="panel bkfilters" style="padding:14px">
+      <div class="bkgrid">
+        ${sel("month", "Month", months.map(m => [m, monthLabel(m)]))}
+        ${sel("type", "Claim type", Object.entries(TYPES).map(([k, t]) => [k, t.label]))}
+        ${sel("area", "Budget area", areas.map(a => [a, a]))}
+        <label>Search<input id="bk-q" data-bk-k="q" type="search" value="${esc(F.q || "")}" placeholder="Name, ref, team, invoice no."></label>
+        <label>Sort by<select data-bk-k="sort" id="bk-sort">${BK_SORTS.map(([v, l]) => `<option value="${v}" ${F.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <span class="sub">Month means the pay period for payroll, the invoice date for invoices, and the date submitted for everything else.</span>
+        <span class="row">${bkActive() ? `<button class="btn small" data-act="bk-clear">Clear filters</button>` : ""}<button class="btn small" data-act="export" ${list.length ? "" : "disabled"}>Export these ${list.length} (CSV)</button></span>
+      </div>
+    </section>`;
+  if (list.length){
+    const money = list.reduce((a, c) => a + num(c.total), 0), hrs = list.filter(c => c.type === "payroll").reduce((a, c) => a + num(c.hours), 0), vat = list.reduce((a, c) => a + num(c.vat_total), 0);
+    const byType = Object.keys(TYPES).map(k => [k, list.filter(c => c.type === k)]).filter(([, l]) => l.length);
+    h += `<div class="totals" style="justify-content:flex-start"><div style="align-items:flex-start"><small>${f === "ready" ? "To pay" : f === "processed" ? "Paid" : "Total"}${bkActive() ? " (filtered)" : ""}</small><strong>${gbp(money)}</strong></div><div style="align-items:flex-start"><small>Claims</small><strong>${list.length}${list.length !== base.length ? ` <span class="sub" style="font-size:.9rem">of ${base.length}</span>` : ""}</strong></div>${hrs ? `<div style="align-items:flex-start"><small>Payroll hours</small><strong>${fmtH(hrs)}</strong></div>` : ""}${vat ? `<div style="align-items:flex-start"><small>VAT included</small><strong>${gbp(vat)}</strong></div>` : ""}</div>
+    ${byType.length > 1 ? `<div class="tablebox"><table><thead><tr><th>Claim type</th><th class="num">Claims</th><th class="num">Amount</th></tr></thead><tbody>${byType.map(([k, l]) => `<tr><td>${esc(TYPES[k].label)}</td><td class="num">${l.length}</td><td class="num">${gbp(l.reduce((a, c) => a + num(c.total), 0))}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${hrs ? `<p class="sub" style="margin:0">Payroll amounts are paid through wages.</p>` : ""}`;
   }
-  if (!list.length) return h + `<div class="empty">${f === "ready" ? "No approved claims are waiting. You'll get an email when one is ready." : "No claims here yet."}</div>`;
+  if (!list.length) return h + `<div class="empty">${bkActive() ? "No claims match these filters." : f === "ready" ? "No approved claims are waiting. You'll get an email when one is ready." : "No claims here yet."}</div>`;
   return h + `<div class="claims">${list.map(c => claimCard(c, (isBookkeeper() && ["approved","processed"].includes(c.status) ? paymentBox(c) : "") + (c.status === "approved" ? `<div class="decide">${isBookkeeper() ? `<div class="row"><input id="payRef-${esc(c.id)}" placeholder="Payment reference (optional)" style="flex:1;min-width:180px"><button class="btn good" data-act="processed" data-id="${esc(c.id)}">Mark as paid</button></div>` : `<span class="sub">Only the bookkeeper can mark claims as paid.</span>`}</div>` : ""))).join("")}</div>`;
 }
 function payeeBank(c){ return c.type === "supplier" ? S.payees[c.id] : c.type === "payroll" ? null : S.banks[c.claimant]; }
@@ -667,7 +705,7 @@ function paymentBox(c){
 }
 function csvCell(v){ v = v == null ? "" : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 async function exportCsv(all){
-  const f = all ? "all" : S.bkFilter, list = bkSet(f);
+  const f = all ? "all" : S.bkFilter, list = all ? S.claims : bkFiltered();
   const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Colleagues carried","Claimable miles","Line amount","Claim total","Attachments","Payee","Supplier VAT no","Due date","VAT invoice","Line net","Line VAT rate","Line VAT","Claim net","Claim VAT","Own rate"].concat(isBookkeeper() ? ["Pay to name","Sort code","Account number"] : []);
   const rows = [head];
   for (const c of list){
@@ -685,7 +723,7 @@ async function exportCsv(all){
     }
   }
   const blob = new Blob(["﻿" + rows.map(r => r.map(csvCell).join(",")).join("\r\n")], {type:"text/csv;charset=utf-8"});
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `rhc-claims-${f}-${today()}.csv`;
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `rhc-claims-${all ? "all" : [f, S.bk.month, S.bk.type, S.bk.area].filter(Boolean).join("-")}-${today()}.csv`;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
@@ -932,6 +970,7 @@ document.addEventListener("click", async e => {
       S.decideOpen = null; rpc("return_claim", {p_claim_id:id, p_reason:note}, "Claim returned to the claimant"); break; }
     case "processed": { b.disabled = true; const inp = $("#payRef-" + CSS.escape(id)); rpc("mark_processed", {p_claim_id:id, p_payment_ref: inp ? inp.value.trim() : ""}, "Marked as paid"); break; }
     case "bk": S.bkFilter = b.dataset.f; render(); break;
+    case "bk-clear": S.bk = {month:"", type:"", area:"", q:"", sort:S.bk.sort}; render(); break;
     case "export": exportCsv(false); break;
     case "export-all": exportCsv(true); break;
     case "save-person": savePerson(id); break;
@@ -951,7 +990,15 @@ document.addEventListener("click", async e => {
       rpc("admin_update_settings", {p_mileage_rate: rate === "" ? null : num(rate), p_budget_areas: $("#sAreas").value.split("\n").map(x => x.trim()).filter(Boolean), p_coaching_rate: rateVal($("#sCRate").value), p_umpiring_rate: rateVal($("#sURate").value), p_mileage_free_miles: num($("#sFree").value), p_mileage_passenger_rate: num($("#sPax").value), p_mileage_free_basis: $("#sBasis").value}, "Settings saved"); break; }
   }
 });
+function onBkField(e){
+  const t = e.target; if (!t.dataset || !t.dataset.bkK) return false;
+  S.bk[t.dataset.bkK] = t.value;
+  if (t.dataset.bkK === "q"){ if (e.type !== "input") return true; const pos = t.selectionStart; render(); const n = $("#bk-q"); if (n){ n.focus(); try { n.setSelectionRange(pos, pos); } catch (x) {} } }
+  else if (e.type === "change") render();
+  return true;
+}
 function onField(e){
+  if (onBkField(e)) return;
   if (e.target.dataset && e.target.dataset.actI != null){ const row = actDraft()[+e.target.dataset.actI]; if (row) row[e.target.dataset.actK] = e.target.value; return; }
   const t = e.target, d = S.draft; if (!d || !t.closest("#claimForm")) return;
   const val = t.type === "checkbox" ? t.checked : t.value;
