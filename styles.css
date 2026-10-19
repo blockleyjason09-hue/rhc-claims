@@ -140,3 +140,20 @@ main.legal{max-width:760px;padding-block:28px 64px;display:block}
 .legal li{margin:4px 0}
 .legal a,.sitefoot a,.notice a,.sub a{color:var(--turf)}
 .sitefoot{padding-block:0 32px;color:var(--muted);font-size:.88rem;display:flex;gap:16px;flex-wrap:wrap}
+/* payroll / invoice mixed lines */
+.lines.mixed td{vertical-align:top}
+.lines.mixed td.cap{padding-top:28px}
+.lines.mixed td.capnum{padding-top:36px}
+.lineflds{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:300px}
+.lineflds{align-items:flex-end}
+.lineflds .fld{flex:1 1 130px;min-width:0;display:flex;flex-direction:column;gap:3px;font-size:.72rem;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.lineflds .fld input{width:100%;min-width:0;font-size:1rem;font-weight:400;letter-spacing:0;text-transform:none;color:var(--fg)}
+.lineflds .fld.w-s{flex:0 1 120px}
+.lineflds .fld.w-xs{flex:0 1 90px}
+.lineflds .chk{padding-bottom:10px}
+.lineflds .rate-tag{padding-bottom:10px}
+.lineflds .chk{flex-direction:row;align-items:center;gap:6px;font-weight:400;font-size:.9rem;white-space:nowrap}
+.lineflds .chk input{flex:none;min-width:0;width:auto}
+.rate-tag{white-space:nowrap}
+.lines.mixed select{min-width:150px}
+.lineflds .fld select{width:100%;min-width:0;font-size:1rem;font-weight:400;letter-spacing:0;text-transform:none;color:var(--fg)}

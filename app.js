@@ -9,9 +9,9 @@ const DEFAULT_AREAS = ["Coaching","Umpiring","Performance travel","Equipment","P
 const TYPES = {
   expense:{label:"Out-of-pocket expense",short:"Expense",blurb:"You paid for something on the club's behalf and want it back.",attach:true,attachHint:"Upload a receipt for every item (photo or PDF).",
     cols:[{k:"date",l:"Date",t:"date"},{k:"item",l:"What was bought",t:"text"},{k:"supplier",l:"Supplier",t:"text",optional:true},{k:"amount",l:"Amount £",t:"money"}]},
-  invoice:{label:"Coaching / umpiring invoice",short:"Invoice",blurb:"You're self-employed and invoicing the club for hours.",attach:true,attachHint:"Upload your invoice (PDF preferred).",
+  invoice:{label:"Coaching / umpiring invoice",short:"Invoice",blurb:"You're self-employed and invoice the club: hours, mileage, retainer or other costs.",attach:true,attachHint:"Upload your invoice (PDF preferred).",
     cols:[{k:"date",l:"Date",t:"date"},{k:"activity",l:"Activity",t:"activity"},{k:"session",l:"Session / match",t:"text"},{k:"hours",l:"Hours",t:"num"},{k:"rate",l:"Rate £/hr",t:"rate"},{k:"_amt",l:"Amount",t:"calc"}]},
-  payroll:{label:"Coaching / umpiring payroll",short:"Payroll",blurb:"You're paid through club payroll. Log your hours for this pay period.",attach:false,
+  payroll:{label:"Coaching / umpiring payroll",short:"Payroll",blurb:"You're paid through club payroll: hours, mileage, retainer or other costs.",attach:false,
     cols:[{k:"date",l:"Date",t:"date"},{k:"activity",l:"Activity",t:"activity"},{k:"session",l:"Session / match",t:"text"},{k:"hours",l:"Hours",t:"num"},{k:"rate",l:"Rate £/hr",t:"rate"},{k:"_amt",l:"Amount",t:"calc"}]},
   mileage:{label:"Mileage",short:"Mileage",blurb:"You drove your own vehicle for club business.",attach:false,
     cols:[{k:"date",l:"Date",t:"date"},{k:"from",l:"From",t:"text"},{k:"to",l:"To",t:"text"},{k:"purpose",l:"Purpose",t:"text"},{k:"miles",l:"Miles (one way)",t:"num"},{k:"ret",l:"Return",t:"check"},{k:"passengers",l:"Colleagues carried",t:"num",optional:true},{k:"chargeable_miles",l:"Claimable miles",t:"chg"},{k:"_amt",l:"Amount",t:"calc"}]}
@@ -102,6 +102,99 @@ function mileageLines(lines){
 function rulesText(src){
   const R = mileageRules(src), pence = v => Math.round(v * 100) + "p";
   return `Mileage is paid at ${pence(R.rate)} a mile. ${R.free ? `The first ${R.free.toLocaleString("en-GB")} miles of each ${R.basis === "claim" ? "claim" : "journey (a return trip counts as one journey)"} aren't claimable. ` : ""}${R.prate ? `Add ${pence(R.prate)} a mile for each colleague you drive.` : ""}`;
+}
+/* ---------- payroll / invoice: mixed lines ---------- */
+const ITEMS = {coaching:"Coaching hours", umpiring:"Umpiring", mileage:"Mileage", retainer:"Coaching retainer", other:"Other"};
+const isMixed = t => t === "invoice" || t === "payroll";
+const lineItem = l => l.item || (l.activity === "Umpiring" ? "umpiring" : "coaching");
+const ownRates = () => !!(S.me && S.me.own_rates);
+const blank = v => v == null || String(v).trim() === "";
+const perSeason = () => !!(S.me && S.me.retainer_period === "season");
+const seasonLabel = s => s ? s.replace("-", "–") : "";
+function seasonOptions(){
+  const n = new Date(), y = n.getMonth() >= 8 ? n.getFullYear() : n.getFullYear() - 1, f = a => `${a}-${String((a + 1) % 100).padStart(2, "0")}`;
+  return [f(y - 1), f(y), f(y + 1)];
+}
+function claimedSeasons(exceptId){
+  const out = new Set();
+  for (const c of S.claims) if (S.me && c.claimant === S.me.id && c.status !== "withdrawn" && c.id !== exceptId) for (const l of (c.lines || [])) if (l.item === "retainer" && l.season) out.add(l.season);
+  return out;
+}
+function itemRate(it, l){
+  if (it === "coaching" || it === "umpiring") return ownRates() ? (num(l.rate) > 0 ? num(l.rate) : null) : hourlyRate(it === "umpiring" ? "Umpiring" : "Coaching");
+  if (it === "retainer"){ if (ownRates() && !blank(l.rate)) return num(l.rate); return S.me && S.me.retainer_amount != null ? num(S.me.retainer_amount) : null; }
+  return null;
+}
+function mixedAmounts(lines){
+  const R = mileageRules(); let left = R.free;
+  return lines.map(l => {
+    const it = lineItem(l);
+    if (it === "mileage"){
+      const m = num(l.miles) * (l.ret ? 2 : 1); let ch;
+      if (R.basis === "claim"){ ch = Math.max(0, m - left); left = Math.max(0, left - m); } else ch = Math.max(0, m - R.free);
+      const pax = Math.max(0, Math.floor(num(l.passengers)));
+      return {it, m, ch, h:0, amt: Math.round(ch * (R.rate + pax * R.prate) * 100) / 100};
+    }
+    if (it === "coaching" || it === "umpiring") return {it, m:0, ch:0, h:num(l.hours), amt: Math.round(num(l.hours) * num(itemRate(it, l)) * 100) / 100};
+    if (it === "retainer") return {it, m:0, ch:0, h:0, amt: Math.round((perSeason() ? 1 : (num(l.qty) || 1)) * num(itemRate(it, l)) * 100) / 100};
+    return {it, m:0, ch:0, h:0, amt: Math.round(num(l.amount) * 100) / 100};
+  });
+}
+function rateProblems(d){
+  if (!d || !isMixed(d.type)) return [];
+  const used = new Set(d.lines.map(lineItem)), out = [];
+  if (!ownRates()){
+    if (used.has("coaching") && hourlyRate("Coaching") == null) out.push("Your coaching rate hasn't been set yet. Ask the club admin to add it.");
+    if (used.has("umpiring") && hourlyRate("Umpiring") == null) out.push("Your umpiring rate hasn't been set yet. Ask the club admin to add it.");
+    if (used.has("retainer") && (!S.me || S.me.retainer_amount == null)) out.push("Your coaching retainer hasn't been set yet. Ask the club admin to add it.");
+  }
+  if (used.has("mileage") && S.settings.mileage_rate == null) out.push("The club mileage rate hasn't been set yet. The club admin sets it in Settings.");
+  return out;
+}
+function ratesNotice(){
+  const me = S.me || {}, ret = me.retainer_amount != null ? gbp(me.retainer_amount) + (perSeason() ? " a season, claimed once per season" : " a month") : null;
+  const club = ownRates() ? `You set your own rates: enter your hourly rate on each coaching or umpiring line${ret ? `. Your retainer is ${ret} unless you enter a different amount` : ", and your retainer amount on a retainer line"}.`
+    : `Your rates are set by the club: coaching ${hourlyRate("Coaching") != null ? gbp(hourlyRate("Coaching")) + "/hr" : "not set"}, umpiring ${hourlyRate("Umpiring") != null ? gbp(hourlyRate("Umpiring")) + "/hr" : "not set"}${ret ? `, retainer ${ret}` : ""}.`;
+  return club + (S.settings.mileage_rate != null ? " " + rulesText() : "");
+}
+function mixedRow(l, i, total){
+  const it = lineItem(l), id = k => `ln-${i}-${k}`, v = k => esc(l[k] == null ? "" : l[k]);
+  const inp = (k, cap, type, cls, extra, ph) => `<label class="fld ${cls || ""}"><span>${esc(cap)}</span><input id="${id(k)}" type="${type || "text"}" data-line="${i}" data-k="${k}" value="${v(k)}" placeholder="${esc(ph || "")}" ${extra || ""}></label>`;
+  const numIn = (k, cap, step, cls, ph) => inp(k, cap, "number", cls || "w-xs", `step="${step}" min="0" inputmode="decimal"`, ph);
+  const rateTxt = (r, unit) => `<span class="sub rate-tag">${r == null ? "rate not set" : "@ " + gbp(r) + unit}</span>`;
+  let f = "";
+  if (it === "coaching" || it === "umpiring") f = inp("session", it === "umpiring" ? "Match" : "Session") + numIn("hours", "Hours", "0.25") + (ownRates() ? numIn("rate", "Your rate £/hr", "0.01", "w-s") : rateTxt(itemRate(it, l), "/hr"));
+  else if (it === "mileage") f = inp("from", "From") + inp("to", "To") + inp("purpose", "Purpose") + numIn("miles", "Miles one way", "1", "w-s") + `<label class="chk"><input type="checkbox" id="${id("ret")}" data-line="${i}" data-k="ret" ${l.ret ? "checked" : ""}> Return</label>` + numIn("passengers", "Colleagues", "1", "w-xs", "0") + `<span class="sub rate-tag" id="${id("ch")}"></span>`;
+  else if (it === "retainer" && perSeason()){ const done = claimedSeasons(S.draft && S.draft.editingId);
+    f = `<label class="fld w-s"><span>Season</span><select id="${id("season")}" data-line="${i}" data-k="season"><option value="">Choose…</option>${seasonOptions().map(o => `<option value="${o}" ${l.season === o ? "selected" : ""} ${done.has(o) && l.season !== o ? "disabled" : ""}>${seasonLabel(o)}${done.has(o) ? " (claimed)" : ""}</option>`).join("")}</select></label>`
+      + inp("description", "Note (optional)", "text", "", "", "e.g. Season retainer") + (ownRates() ? numIn("rate", "Amount £/season", "0.01", "w-s", S.me && S.me.retainer_amount != null ? String(S.me.retainer_amount) : "") : rateTxt(itemRate(it, l), "/season")); }
+  else if (it === "retainer") f = inp("description", "Which month", "text", "", "", "e.g. November retainer") + numIn("qty", "Months", "1", "w-xs", "1") + (ownRates() ? numIn("rate", "Amount £/month", "0.01", "w-s", S.me && S.me.retainer_amount != null ? String(S.me.retainer_amount) : "") : rateTxt(itemRate(it, l), "/month"));
+  else f = inp("description", "What it's for", "text", "", "", "e.g. Coaching course fee") + numIn("amount", "Amount £", "0.01", "w-s");
+  return `<tr><td class="cap"><input id="${id("date")}" type="date" data-line="${i}" data-k="date" value="${v("date")}" aria-label="Date"></td>
+    <td class="cap"><select id="${id("item")}" data-line="${i}" data-k="item" aria-label="What you're claiming">${Object.entries(ITEMS).map(([k, lab]) => `<option value="${k}" ${k === it ? "selected" : ""}>${lab}</option>`).join("")}</select></td>
+    <td><div class="lineflds">${f}</div></td><td class="num calc capnum" id="${id("_amt")}">–</td>
+    <td class="cap"><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${total < 2 ? "disabled" : ""}>✕</button></td></tr>`;
+}
+function mixedDetail(l){
+  const it = lineItem(l);
+  if (it === "mileage") return `${l.from || ""} to ${l.to || ""}${l.ret ? " and return" : ""}${l.purpose ? " – " + l.purpose : ""}${num(l.passengers) ? `, ${num(l.passengers)} colleague${num(l.passengers) > 1 ? "s" : ""}` : ""}`;
+  if (it === "coaching" || it === "umpiring") return l.session || "";
+  if (it === "retainer" && l.season) return `Season ${seasonLabel(l.season)}${l.description ? " – " + l.description : ""}`;
+  return l.description || "";
+}
+function mixedQty(l){
+  const it = lineItem(l);
+  if (it === "mileage") return `${num(l.chargeable_miles)} of ${num(l.miles) * (l.ret ? 2 : 1)} mi`;
+  if (it === "coaching" || it === "umpiring") return fmtH(l.hours);
+  if (it === "retainer"){ if (l.period === "season" || l.season) return "1 season"; const q = num(l.qty) || 1; return `${q} month${q > 1 ? "s" : ""}`; }
+  return "";
+}
+function mixedRate(l){
+  const it = lineItem(l);
+  if (it === "mileage") return num(l.chargeable_miles) > 0 ? `${Math.round(num(l.amount) / num(l.chargeable_miles) * 100)}p/mi` : (l.rate != null ? `${Math.round(num(l.rate) * 100)}p/mi` : "");
+  if (it === "coaching" || it === "umpiring") return l.rate != null ? gbp(l.rate) + "/hr" : "";
+  if (it === "retainer") return l.rate != null ? gbp(l.rate) + (l.period === "season" || l.season ? "/season" : "/month") : "";
+  return "";
 }
 function lineAmount(type, l, rate){
   if (type === "expense") return num(l.amount);
@@ -282,8 +375,9 @@ function viewNew(){
   const T = TYPES[d.type], COLS = colsFor(d.type, d.vat_invoice), areas = (S.settings.budget_areas && S.settings.budget_areas.length) ? S.settings.budget_areas : DEFAULT_AREAS;
   const rate = S.settings.mileage_rate;
   h += `<section class="panel" id="claimForm">
-    <div class="row"><h2 style="flex:1">${esc(T.label)}</h2><span class="sub">Paying ${esc(S.me.full_name)}</span></div>
-    ${missingRates(d).length ? `<div class="notice warn">Your ${esc(missingRates(d).map(a => a.toLowerCase()).join(" and "))} rate hasn't been set yet, so this claim can't be submitted. Ask the club admin to add it.</div>` : ["invoice","payroll"].includes(d.type) ? `<div class="notice">Your hourly rates are set by the club: coaching ${hourlyRate("Coaching") != null ? gbp(hourlyRate("Coaching")) : "not set"}, umpiring ${hourlyRate("Umpiring") != null ? gbp(hourlyRate("Umpiring")) : "not set"}.</div>` : ""}
+    <div class="row"><h2 style="flex:1">${esc(T.label)}</h2><span class="sub">${d.type === "supplier" ? (d.supplier_name ? "Paying " + esc(d.supplier_name) : "Paying the supplier") : "Paying " + esc(S.me.full_name)}</span></div>
+    ${isMixed(d.type) ? `<div class="notice">${esc(ratesNotice())}</div>` : ""}
+    ${rateProblems(d).length ? `<div class="notice warn">${rateProblems(d).map(esc).join("<br>")}</div>` : ""}
     ${d.type === "mileage" && rate != null ? `<div class="notice">${esc(rulesText())}</div>` : ""}
     ${d.type === "mileage" && rate == null ? `<div class="notice warn">The club mileage rate hasn't been set yet, so mileage claims can't be submitted. The club admin sets it in Settings.</div>` : ""}
     <div class="grid">
@@ -296,14 +390,14 @@ function viewNew(){
     ${d.type === "supplier" ? `<label style="flex-direction:row;align-items:center;gap:10px"><input type="checkbox" id="fVat" data-f="vat_invoice" ${d.vat_invoice ? "checked" : ""}> This is a VAT invoice <span class="hint">(it shows the supplier's VAT number and a VAT amount)</span></label>${d.vat_invoice ? `<label style="max-width:320px">Supplier's VAT number<input id="fVatNo" data-f="supplier_vat_number" value="${esc(d.supplier_vat_number)}" placeholder="e.g. GB123456789"></label>` : ""}` : ""}
     <label>What is this claim for?<textarea id="fDesc" data-f="description" placeholder="${d.type === "mileage" ? "e.g. Driving to the U14 regional tournament" : d.type === "expense" ? "e.g. First-aid kit restock for match day" : "e.g. U14 girls Sunday sessions, October"}">${esc(d.description)}</textarea></label>
     <div>
-      <h3 style="margin-bottom:8px">${d.type === "mileage" ? "Journeys" : d.type === "expense" ? "Items" : "Hours"}</h3>
-      <div class="tablebox"><table class="lines"><thead><tr>${COLS.map(c => `<th class="${NUMERIC_COLS.includes(c.t) ? "num" : ""}">${esc(c.l)}</th>`).join("")}<th></th></tr></thead>
-      <tbody>${d.lines.map((l,i) => `<tr>${COLS.map(c => lineCell(c,l,i)).join("")}<td><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></td></tr>`).join("")}</tbody></table></div>
-      <div class="row" style="margin-top:10px"><button class="btn small" data-act="add-line">+ Add ${d.type === "mileage" ? "journey" : d.type === "expense" ? "item" : "session"}</button></div>
+      <h3 style="margin-bottom:8px">${d.type === "mileage" ? "Journeys" : d.type === "expense" ? "Items" : d.type === "supplier" ? "Invoice lines" : "What you're claiming"}</h3>
+      ${isMixed(d.type) ? `<div class="tablebox"><table class="lines mixed"><thead><tr><th>Date</th><th>Item</th><th>Details</th><th class="num">Amount</th><th></th></tr></thead><tbody>${d.lines.map((l,i) => mixedRow(l, i, d.lines.length)).join("")}</tbody></table></div>` : `<div class="tablebox"><table class="lines"><thead><tr>${COLS.map(c => `<th class="${NUMERIC_COLS.includes(c.t) ? "num" : ""}">${esc(c.l)}</th>`).join("")}<th></th></tr></thead>
+      <tbody>${d.lines.map((l,i) => `<tr>${COLS.map(c => lineCell(c,l,i)).join("")}<td><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></td></tr>`).join("")}</tbody></table></div>`}
+      <div class="row" style="margin-top:10px"><button class="btn small" data-act="add-line">+ Add ${d.type === "mileage" ? "journey" : d.type === "expense" ? "item" : "line"}</button></div>
     </div>
     <div class="totals" id="totals"></div>
     ${T.attach ? `<div style="display:flex;flex-direction:column;gap:8px">
-      <label for="fFile">${d.type === "invoice" ? "Invoice" : "Receipts"} <span class="hint">${esc(T.attachHint)}</span></label>
+      <label for="fFile">${d.type === "invoice" || d.type === "supplier" ? "Invoice" : "Receipts"} <span class="hint">${esc(T.attachHint)}</span></label>
       <input type="file" id="fFile" multiple accept="image/*,application/pdf">
       <div class="files" id="fileList">${filesHtml(d.attachments, true)}</div>
     </div>` : ""}
@@ -343,6 +437,12 @@ function filesHtml(list, editable){
 function recalc(){
   const d = S.draft; if (!d || !d.type) return; const el = $("#totals"); if (!el) return;
   const rate = S.settings.mileage_rate;
+  if (isMixed(d.type)){
+    const ma = mixedAmounts(d.lines); let tot = 0, hrs = 0, ch = 0, anyMiles = false;
+    ma.forEach((x, i) => { const c = $(`#ln-${i}-_amt`); if (c) c.textContent = gbp(x.amt); const cm = $(`#ln-${i}-ch`); if (cm) cm.textContent = `${x.ch.toLocaleString("en-GB")} claimable mi`; tot += x.amt; hrs += x.h; ch += x.ch; if (x.it === "mileage") anyMiles = true; });
+    el.innerHTML = (hrs ? `<div><small>Hours</small><strong>${fmtH(hrs)}</strong></div>` : "") + (anyMiles ? `<div><small>Claimable miles</small><strong>${ch.toLocaleString("en-GB")}</strong></div>` : "") + `<div><small>Total claimed</small><strong>${gbp(Math.round(tot * 100) / 100)}</strong></div>`;
+    return;
+  }
   const ml = d.type === "mileage" ? mileageLines(d.lines) : null;
   d.lines.forEach((l,i) => { const c = $(`#ln-${i}-_amt`); if (c) c.textContent = gbp(ml ? ml[i].amt : lineAmount(d.type, l, rate)); const cm = $(`#ln-${i}-chargeable_miles`); if (cm && ml) cm.textContent = ml[i].ch.toLocaleString("en-GB"); const cv = $(`#ln-${i}-vat`); if (cv) cv.textContent = gbp(lineVat(l)); const r = $(`#ln-${i}-rate`); if (r){ const v = hourlyRate(l.activity); r.textContent = v == null ? "not set" : gbp(v); } });
   const t = totals(d.type, d.lines, rate);
@@ -368,8 +468,17 @@ function validate(d){
   if (!d.description.trim()) errs.push("Say what the claim is for.");
   if (d.type === "invoice" && !d.invoice_number.trim()) errs.push("Add your invoice number.");
   if (d.type === "mileage" && S.settings.mileage_rate == null) errs.push("The club mileage rate isn't set yet.");
-  for (const a of missingRates(d)) errs.push(`Your ${a.toLowerCase()} rate hasn't been set yet. Ask the club admin to add it.`);
-  const need = COLS.filter(c => !DISPLAY_ONLY.concat(["check","vatrate"]).includes(c.t) && !c.optional).map(c => c.k);
+  for (const m of rateProblems(d)) errs.push(m);
+  if (isMixed(d.type)) d.lines.forEach((l, i) => {
+    const it = lineItem(l), n = `Line ${i + 1} (${ITEMS[it].toLowerCase()})`;
+    if (blank(l.date)) errs.push(`${n}: add the date.`);
+    if (it === "coaching" || it === "umpiring"){ if (blank(l.session)) errs.push(`${n}: say which ${it === "umpiring" ? "match" : "session"}.`); if (num(l.hours) <= 0) errs.push(`${n}: add the hours.`); if (ownRates() && num(l.rate) <= 0) errs.push(`${n}: enter your hourly rate.`); }
+    else if (it === "mileage"){ if (blank(l.from) || blank(l.to)) errs.push(`${n}: add where you drove from and to.`); if (blank(l.purpose)) errs.push(`${n}: add the purpose.`); if (num(l.miles) <= 0) errs.push(`${n}: add the miles.`); }
+    else if (it === "retainer" && perSeason()){ if (blank(l.season)) errs.push(`${n}: choose the season.`); else if (claimedSeasons(d.editingId).has(l.season)) errs.push(`${n}: you've already claimed your ${seasonLabel(l.season)} season retainer.`); else if (d.lines.filter(x => lineItem(x) === "retainer" && x.season === l.season).length > 1) errs.push(`${n}: the ${seasonLabel(l.season)} retainer is on this claim twice.`); if (ownRates() && blank(l.rate) && (!S.me || S.me.retainer_amount == null)) errs.push(`${n}: enter the retainer amount.`); }
+    else if (it === "retainer"){ if (blank(l.description)) errs.push(`${n}: say which month it's for.`); if (!blank(l.qty) && num(l.qty) <= 0) errs.push(`${n}: months must be at least 1.`); if (ownRates() && blank(l.rate) && (!S.me || S.me.retainer_amount == null)) errs.push(`${n}: enter the monthly amount.`); }
+    else { if (blank(l.description)) errs.push(`${n}: describe what it's for.`); if (num(l.amount) <= 0) errs.push(`${n}: add the amount.`); }
+  });
+  const need = isMixed(d.type) ? [] : COLS.filter(c => !DISPLAY_ONLY.concat(["check","vatrate"]).includes(c.t) && !c.optional).map(c => c.k);
   d.lines.forEach((l,i) => { for (const k of need){ const v = l[k]; if (v == null || String(v).trim() === "" || (["amount","hours","miles","rate","net"].includes(k) && num(v) <= 0)){ errs.push(`Line ${i+1}: fill in ${COLS.find(c => c.k === k).l.toLowerCase()}.`); break; } } });
   if (T.attach && !d.attachments.length) errs.push(d.type === "invoice" ? "Upload your invoice." : d.type === "supplier" ? "Upload the supplier's invoice." : "Upload at least one receipt.");
   if (!d.declare) errs.push("Tick the confirmation box.");
@@ -379,7 +488,13 @@ async function submitDraft(){
   const d = S.draft, errs = validate(d), box = $("#formErr");
   if (errs.length){ box.innerHTML = errs.map(esc).join("<br>"); box.hidden = false; box.scrollIntoView({block:"nearest"}); return; }
   box.hidden = true; const btn = $("#submitBtn"); btn.disabled = true; btn.textContent = "Submitting…";
-  const lines = d.lines.map(l => { const o = {}; for (const c of colsFor(d.type, d.vat_invoice)){ if (DISPLAY_ONLY.includes(c.t)) continue; if (c.t === "vatrate"){ o[c.k] = l[c.k] == null || l[c.k] === "" ? 20 : num(l[c.k]); continue; } o[c.k] = (c.t === "money" || c.t === "num") ? num(l[c.k]) : c.t === "check" ? !!l[c.k] : String(l[c.k] || (c.t === "activity" ? "Coaching" : "")).trim(); } return o; });
+  const mixedLine = l => { const it = lineItem(l), o = {date: l.date, item: it};
+    if (it === "coaching" || it === "umpiring"){ o.session = String(l.session || "").trim(); o.hours = num(l.hours); if (ownRates()) o.rate = num(l.rate); }
+    else if (it === "mileage"){ o.from = String(l.from || "").trim(); o.to = String(l.to || "").trim(); o.purpose = String(l.purpose || "").trim(); o.miles = num(l.miles); o.ret = !!l.ret; o.passengers = Math.max(0, Math.floor(num(l.passengers))); }
+    else if (it === "retainer"){ o.description = String(l.description || "").trim(); if (perSeason()) o.season = l.season; else o.qty = num(l.qty) || 1; if (ownRates() && !blank(l.rate)) o.rate = num(l.rate); }
+    else { o.description = String(l.description || "").trim(); o.amount = num(l.amount); }
+    return o; };
+  const lines = isMixed(d.type) ? d.lines.map(mixedLine) : d.lines.map(l => { const o = {}; for (const c of colsFor(d.type, d.vat_invoice)){ if (DISPLAY_ONLY.includes(c.t)) continue; if (c.t === "vatrate"){ o[c.k] = l[c.k] == null || l[c.k] === "" ? 20 : num(l[c.k]); continue; } o[c.k] = (c.t === "money" || c.t === "num") ? num(l[c.k]) : c.t === "check" ? !!l[c.k] : String(l[c.k] || (c.t === "activity" ? "Coaching" : "")).trim(); } return o; });
   const p = {type:d.type, budget_area:d.budget_area, team:d.team, description:d.description,
     invoice_number:["invoice","supplier"].includes(d.type) ? d.invoice_number : "", invoice_date:["invoice","supplier"].includes(d.type) ? d.invoice_date : "",
     supplier_name:d.supplier_name || "", supplier_email:d.supplier_email || "", due_date:d.type === "supplier" ? (d.due_date || "") : "",
@@ -431,9 +546,11 @@ function claimDetail(c, open){
   return `<details ${open ? "open" : ""}><summary>Claim details</summary>
     <div style="display:flex;flex-direction:column;gap:10px">
     <p style="margin:0">${esc(c.description)}</p>
-    <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "supplier" ? `${c.due_date ? `<span>Due ${fmtDate(c.due_date)}</span>` : ""}${c.supplier_email ? `<span>${esc(c.supplier_email)}</span>` : ""}${c.vat_invoice ? `<span>VAT no. ${esc(c.supplier_vat_number)} · Net ${gbp(c.net_total)} + VAT ${gbp(c.vat_total)}</span>` : `<span>Not a VAT invoice</span>`}` : ""}${c.type === "mileage" ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
-    <div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${NUMERIC_COLS.includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
-    <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}</tr>`).join("")}</tbody></table></div>
+    <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "supplier" ? `${c.due_date ? `<span>Due ${fmtDate(c.due_date)}</span>` : ""}${c.supplier_email ? `<span>${esc(c.supplier_email)}</span>` : ""}${c.vat_invoice ? `<span>VAT no. ${esc(c.supplier_vat_number)} · Net ${gbp(c.net_total)} + VAT ${gbp(c.vat_total)}</span>` : `<span>Not a VAT invoice</span>`}` : ""}${(c.type === "mileage" || (isMixed(c.type) && c.mileage_rules)) ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
+    ${isMixed(c.type) ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Item</th><th>Details</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
+    <tbody>${(c.lines || []).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(ITEMS[lineItem(l)])}${l.own_rate ? ` <span class="pill pending" title="Rate entered by the claimant">own rate</span>` : ""}</td><td>${esc(mixedDetail(l))}</td><td class="num">${esc(mixedQty(l))}</td><td class="num">${esc(mixedRate(l))}</td><td class="num">${gbp(l.amount)}</td></tr>`).join("")}</tbody></table></div>`
+    : `<div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${NUMERIC_COLS.includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
+    <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}</tr>`).join("")}</tbody></table></div>`}
     ${c.attachments && c.attachments.length ? `<div class="files">${filesHtml(c.attachments, false)}</div>` : ""}
     </div></details>`;
 }
@@ -513,18 +630,19 @@ function paymentBox(c){
 function csvCell(v){ v = v == null ? "" : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 async function exportCsv(all){
   const f = all ? "all" : S.bkFilter, list = bkSet(f);
-  const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Colleagues carried","Claimable miles","Line amount","Claim total","Attachments","Payee","Supplier VAT no","Due date","VAT invoice","Line net","Line VAT rate","Line VAT","Claim net","Claim VAT"].concat(isBookkeeper() ? ["Pay to name","Sort code","Account number"] : []);
+  const head = ["Ref","Status","Type","Claimant","Claimant email","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Colleagues carried","Claimable miles","Line amount","Claim total","Attachments","Payee","Supplier VAT no","Due date","VAT invoice","Line net","Line VAT rate","Line VAT","Claim net","Claim VAT","Own rate"].concat(isBookkeeper() ? ["Pay to name","Sort code","Account number"] : []);
   const rows = [head];
   for (const c of list){
     const p = S.people[c.claimant] || {};
     for (const l of (c.lines || [])){
-      const detail = c.type === "supplier" ? l.item : c.type === "mileage" ? `${l.from} to ${l.to}${l.ret ? " and return" : ""} – ${l.purpose}` : c.type === "expense" ? `${l.item}${l.supplier ? " (" + l.supplier + ")" : ""}` : l.session;
+      const mix = isMixed(c.type), miles = c.type === "mileage" || (mix && lineItem(l) === "mileage");
+      const detail = mix ? mixedDetail(l) : c.type === "supplier" ? l.item : c.type === "mileage" ? `${l.from} to ${l.to}${l.ret ? " and return" : ""} – ${l.purpose}` : c.type === "expense" ? `${l.item}${l.supplier ? " (" + l.supplier + ")" : ""}` : l.session;
       rows.push([c.ref, STATUS[c.status].label, TYPES[c.type].short, personName(c.claimant), p.email || "", c.budget_area, c.team, c.description, c.invoice_number, c.invoice_date || "", c.pay_period,
         isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), c.second_approver ? personName(c.second_approver) : "", isoDay(c.second_approved_at),
-        isoDay(c.processed_at), c.payment_ref || "", l.date, detail, l.activity || "", l.hours || "", l.rate || c.mileage_rate || "",
-        c.type === "mileage" ? num(l.miles) * (l.ret ? 2 : 1) : "", c.type === "mileage" ? (l.passengers || 0) : "", c.type === "mileage" ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.total, (c.attachments || []).map(a => a.name).join("; "),
+        isoDay(c.processed_at), c.payment_ref || "", l.date, detail, mix ? ITEMS[lineItem(l)] : (l.activity || ""), mix && lineItem(l) === "retainer" ? "" : (l.hours || ""), l.rate ?? (miles ? c.mileage_rate : "") ?? "",
+        miles ? num(l.miles) * (l.ret ? 2 : 1) : "", miles ? (l.passengers || 0) : "", miles ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.total, (c.attachments || []).map(a => a.name).join("; "),
         c.type === "supplier" ? c.supplier_name : personName(c.claimant), c.supplier_vat_number || "", c.due_date || "", c.vat_invoice ? "Yes" : "No",
-        c.type === "supplier" ? (l.net ?? "") : "", c.vat_invoice ? (l.vat_rate ?? "") : "", c.vat_invoice ? (l.vat ?? "") : "", c.net_total ?? c.total, c.vat_total ?? 0]
+        c.type === "supplier" ? (l.net ?? "") : "", c.vat_invoice ? (l.vat_rate ?? "") : "", c.vat_invoice ? (l.vat ?? "") : "", c.net_total ?? c.total, c.vat_total ?? 0, l.own_rate ? "Yes" : ""]
         .concat(isBookkeeper() ? (b => b ? [b.account_name, fmtSort(b.sort_code), b.account_number] : [c.type === "payroll" ? "Payroll" : "", "", ""])(payeeBank(c)) : []));
     }
   }
@@ -546,6 +664,9 @@ function viewPeople(){
       <label><input type="checkbox" data-r="admin" ${p.is_admin ? "checked" : ""}> Admin</label>
       <label>Coaching £/hr <input type="number" step="0.01" min="0" inputmode="decimal" data-r="crate" value="${p.coaching_rate == null ? "" : esc(p.coaching_rate)}" placeholder="${S.settings.coaching_rate == null ? "not set" : "club " + esc(S.settings.coaching_rate)}" style="width:7.5em"></label>
       <label>Umpiring £/hr <input type="number" step="0.01" min="0" inputmode="decimal" data-r="urate" value="${p.umpiring_rate == null ? "" : esc(p.umpiring_rate)}" placeholder="${S.settings.umpiring_rate == null ? "not set" : "club " + esc(S.settings.umpiring_rate)}" style="width:7.5em"></label>
+      <label>Retainer £ <input type="number" step="0.01" min="0" inputmode="decimal" data-r="retainer" value="${p.retainer_amount == null ? "" : esc(p.retainer_amount)}" placeholder="none" style="width:7.5em"></label>
+      <label>Paid <select data-r="retainer-period" style="width:auto"><option value="month" ${p.retainer_period !== "season" ? "selected" : ""}>per month</option><option value="season" ${p.retainer_period === "season" ? "selected" : ""}>once per season</option></select></label>
+      <label><input type="checkbox" data-r="own" ${p.own_rates ? "checked" : ""}> Sets own rates</label>
     </div>
     <div style="display:flex;flex-direction:column;gap:6px;align-items:stretch">
       <button class="btn small primary" data-act="save-person" data-id="${esc(p.id)}">Save</button>
@@ -556,7 +677,7 @@ function viewPeople(){
   </div>`;
   const counts = Object.keys(TYPES).map(k => [k, ppl.filter(p => p.active && (p.approver_types || []).includes(k)).length]);
   const thin = counts.filter(([,n]) => n < 3).map(([k]) => TYPES[k].short.toLowerCase());
-  return `<div><h2>People</h2><p class="lede">Activate new accounts, choose who approves each claim type, and set hourly rates. Leave a rate blank to use the club rate from Settings. Everyone active can submit claims. A claim needs two different approvers for its type, so give each type at least three, in case one of them is the claimant.</p></div>
+  return `<div><h2>People</h2><p class="lede">Activate new accounts, choose who approves each claim type, and set how each coach is paid. Leave a rate blank to use the club rate from Settings. Add a retainer for coaches paid a fixed amount, either per month or once per season (a season retainer can only be claimed once). Tick "Sets own rates" for coaches who invoice at their own rate; their lines are flagged for approvers. Everyone active can submit claims. A claim needs two different approvers for its type, so give each type at least three, in case one of them is the claimant.</p></div>
     ${thin.length ? `<div class="notice warn">Fewer than three approvers for: ${esc(thin.join(", "))}.</div>` : ""}
     <section class="panel" style="gap:0;padding-block:6px">${ppl.length ? ppl.map(row).join("") : `<p class="sub">Nobody has created an account yet.</p>`}</section>`;
 }
@@ -566,7 +687,8 @@ async function savePerson(id){
   const q = s => r.querySelector(s);
   const args = {p_user:id, p_active:q('[data-r="active"]').checked, p_is_admin:q('[data-r="admin"]').checked, p_is_bookkeeper:q('[data-r="books"]').checked,
     p_approver_types:[...r.querySelectorAll('[data-r="ap"]:checked')].map(i => i.value),
-    p_coaching_rate: rateVal(q('[data-r="crate"]').value), p_umpiring_rate: rateVal(q('[data-r="urate"]').value), p_can_log_suppliers: q('[data-r="sup"]').checked};
+    p_coaching_rate: rateVal(q('[data-r="crate"]').value), p_umpiring_rate: rateVal(q('[data-r="urate"]').value), p_can_log_suppliers: q('[data-r="sup"]').checked,
+    p_retainer_amount: rateVal(q('[data-r="retainer"]').value), p_own_rates: q('[data-r="own"]').checked, p_retainer_period: q('[data-r="retainer-period"]').value};
   const {error} = await S.sb.rpc("admin_update_user", args);
   if (error){ toast(errText(error)); return; }
   toast("Saved " + (S.people[id] && S.people[id].full_name || "")); await loadAll(false);
@@ -674,7 +796,7 @@ document.addEventListener("click", async e => {
     case "reload": await loadAll(false); render(); break;
     case "tab": S.tab = b.dataset.tab; if (S.tab !== "new") S.lastSubmitted = null; S.editingDetails = false; render(); window.scrollTo(0,0); break;
     case "type": { const k = S.draft; S.draft = blankDraft(b.dataset.type); if (k){ S.draft.budget_area = k.budget_area; S.draft.team = k.team; S.draft.description = k.description; } saveLocalDraft(); render(); break; }
-    case "add-line": { const last = S.draft.lines[S.draft.lines.length - 1] || {}; const n = {date: last.date || today()}; if (last.activity) n.activity = last.activity; S.draft.lines.push(n); render(); break; }
+    case "add-line": { const last = S.draft.lines[S.draft.lines.length - 1] || {}; const n = {date: last.date || today()}; if (last.activity) n.activity = last.activity; if (last.item) n.item = last.item; S.draft.lines.push(n); render(); break; }
     case "del-line": S.draft.lines.splice(+b.dataset.i, 1); render(); break;
     case "del-file": { const [gone] = S.draft.attachments.splice(+b.dataset.i, 1); $("#fileList").innerHTML = filesHtml(S.draft.attachments, true); saveLocalDraft();
       if (gone && !S.draft.editingId) S.sb.storage.from("receipts").remove([gone.path]); break; }
@@ -742,7 +864,7 @@ document.addEventListener("click", async e => {
       S.editingDetails = false; toast("Details saved"); await loadAll(false); render(); break;
     }
     case "edit-claim": { const c = claim(); if (!c) break;
-      S.draft = {editingId:c.id, editingRef:c.ref, type:c.type, budget_area:c.budget_area, team:c.team || "", description:c.description, invoice_number:c.invoice_number || "", invoice_date:c.invoice_date || today(), pay_period:c.pay_period || "", lines:JSON.parse(JSON.stringify(c.lines || [])), attachments:(c.attachments || []).slice(), declare:false,
+      S.draft = {editingId:c.id, editingRef:c.ref, type:c.type, budget_area:c.budget_area, team:c.team || "", description:c.description, invoice_number:c.invoice_number || "", invoice_date:c.invoice_date || today(), pay_period:c.pay_period || "", lines:JSON.parse(JSON.stringify(c.lines || [])).map(l => isMixed(c.type) ? Object.assign(l, {item: lineItem(l)}, l.own_rate ? {} : {rate: undefined}) : l), attachments:(c.attachments || []).slice(), declare:false,
         supplier_name:c.supplier_name || "", supplier_email:c.supplier_email || "", due_date:c.due_date || "", vat_invoice:!!c.vat_invoice, supplier_vat_number:c.supplier_vat_number || "",
         bank_name:(S.payees[c.id] || {}).account_name || "", bank_sort:fmtSort((S.payees[c.id] || {}).sort_code), bank_acct:(S.payees[c.id] || {}).account_number || ""};
       S.tab = "new"; S.lastSubmitted = null; render(); window.scrollTo(0,0); break; }
@@ -768,7 +890,7 @@ function onField(e){
   const t = e.target, d = S.draft; if (!d || !t.closest("#claimForm")) return;
   const val = t.type === "checkbox" ? t.checked : t.value;
   if (t.dataset.f) { d[t.dataset.f] = val; if (t.dataset.f === "vat_invoice" && e.type === "change"){ render(); return; } }
-  else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ l[t.dataset.k] = val; recalc(); } }
+  else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ l[t.dataset.k] = val; if (t.dataset.k === "item"){ saveLocalDraft(); render(); return; } recalc(); } }
   clearTimeout(onField._t); onField._t = setTimeout(saveLocalDraft, 400);
 }
 document.addEventListener("input", onField);
