@@ -104,7 +104,18 @@ function rulesText(src){
   return `Mileage is paid at ${pence(R.rate)} a mile. ${R.free ? `The first ${R.free.toLocaleString("en-GB")} miles of each ${R.basis === "claim" ? "claim" : "journey (a return trip counts as one journey)"} aren't claimable. ` : ""}${R.prate ? `Add ${pence(R.prate)} a mile for each colleague you drive.` : ""}`;
 }
 /* ---------- payroll / invoice: mixed lines ---------- */
-const ITEMS = {coaching:"Coaching hours", umpiring:"Umpiring", mileage:"Mileage", retainer:"Coaching retainer", other:"Other"};
+const ITEMS = {coaching:"Coaching hours", umpiring:"Umpiring", mileage:"Mileage", retainer:"Coaching retainer", other:"Other cost", activity:"Hours"};
+const ACT_GROUPS = ["Junior coaching","Senior coaching","Programmes","Umpiring","Schools","Club duties"];
+const acts = () => Array.isArray(S.settings.payroll_activities) ? S.settings.payroll_activities : [];
+const actByKey = k => acts().find(a => a.key === k) || null;
+const itemLabel = l => lineItem(l) === "activity" ? (l.activity || (actByKey(l.activity_key) || {}).label || "Hours") : ITEMS[lineItem(l)];
+function activityRate(key){
+  const a = actByKey(key); if (!a) return null;
+  const mine = S.me && S.me.activity_rates && S.me.activity_rates[key];
+  if (!blank(mine)) return num(mine);
+  if (!blank(a.rate)) return num(a.rate);
+  return hourlyRate(a.group === "Umpiring" ? "Umpiring" : "Coaching");
+}
 const isMixed = t => t === "invoice" || t === "payroll";
 const lineItem = l => l.item || (l.activity === "Umpiring" ? "umpiring" : "coaching");
 const ownRates = () => !!(S.me && S.me.own_rates);
@@ -121,6 +132,7 @@ function claimedSeasons(exceptId){
   return out;
 }
 function itemRate(it, l){
+  if (it === "activity") return ownRates() ? (num(l.rate) > 0 ? num(l.rate) : null) : activityRate(l.activity_key);
   if (it === "coaching" || it === "umpiring") return ownRates() ? (num(l.rate) > 0 ? num(l.rate) : null) : hourlyRate(it === "umpiring" ? "Umpiring" : "Coaching");
   if (it === "retainer"){ if (ownRates() && !blank(l.rate)) return num(l.rate); return S.me && S.me.retainer_amount != null ? num(S.me.retainer_amount) : null; }
   return null;
@@ -135,7 +147,7 @@ function mixedAmounts(lines){
       const pax = Math.max(0, Math.floor(num(l.passengers)));
       return {it, m, ch, h:0, amt: Math.round(ch * (R.rate + pax * R.prate) * 100) / 100};
     }
-    if (it === "coaching" || it === "umpiring") return {it, m:0, ch:0, h:num(l.hours), amt: Math.round(num(l.hours) * num(itemRate(it, l)) * 100) / 100};
+    if (it === "coaching" || it === "umpiring" || it === "activity") return {it, m:0, ch:0, h:num(l.hours), amt: Math.round(num(l.hours) * num(itemRate(it, l)) * 100) / 100};
     if (it === "retainer") return {it, m:0, ch:0, h:0, amt: Math.round((perSeason() ? 1 : (num(l.qty) || 1)) * num(itemRate(it, l)) * 100) / 100};
     return {it, m:0, ch:0, h:0, amt: Math.round(num(l.amount) * 100) / 100};
   });
@@ -147,11 +159,17 @@ function rateProblems(d){
     if (used.has("coaching") && hourlyRate("Coaching") == null) out.push("Your coaching rate hasn't been set yet. Ask the club admin to add it.");
     if (used.has("umpiring") && hourlyRate("Umpiring") == null) out.push("Your umpiring rate hasn't been set yet. Ask the club admin to add it.");
     if (used.has("retainer") && (!S.me || S.me.retainer_amount == null)) out.push("Your coaching retainer hasn't been set yet. Ask the club admin to add it.");
+    for (const k of new Set(d.lines.filter(l => lineItem(l) === "activity" && l.activity_key).map(l => l.activity_key))) if (activityRate(k) == null) out.push(`No hourly rate is set for ${(actByKey(k) || {}).label || "that activity"} yet. Ask the club admin to add it.`);
   }
   if (used.has("mileage") && S.settings.mileage_rate == null) out.push("The club mileage rate hasn't been set yet. The club admin sets it in Settings.");
   return out;
 }
-function ratesNotice(){
+function ratesNotice(type){
+  if (type === "payroll"){
+    const me = S.me || {}, ret = me.retainer_amount != null ? gbp(me.retainer_amount) + (perSeason() ? " a season, claimed once per season" : " a month") : null;
+    return (ownRates() ? "You set your own rates: enter your hourly rate on each line." : "Pick the timesheet heading for each line. Your hourly rate for that heading is set by the club and shows on the line.")
+      + (ret ? ` Your retainer is ${ret}.` : "") + (S.settings.mileage_rate != null ? " " + rulesText() : "");
+  }
   const me = S.me || {}, ret = me.retainer_amount != null ? gbp(me.retainer_amount) + (perSeason() ? " a season, claimed once per season" : " a month") : null;
   const club = ownRates() ? `You set your own rates: enter your hourly rate on each coaching or umpiring line${ret ? `. Your retainer is ${ret} unless you enter a different amount` : ", and your retainer amount on a retainer line"}.`
     : `Your rates are set by the club: coaching ${hourlyRate("Coaching") != null ? gbp(hourlyRate("Coaching")) + "/hr" : "not set"}, umpiring ${hourlyRate("Umpiring") != null ? gbp(hourlyRate("Umpiring")) + "/hr" : "not set"}${ret ? `, retainer ${ret}` : ""}.`;
@@ -163,7 +181,8 @@ function mixedRow(l, i, total){
   const numIn = (k, cap, step, cls, ph) => inp(k, cap, "number", cls || "w-xs", `step="${step}" min="0" inputmode="decimal"`, ph);
   const rateTxt = (r, unit) => `<span class="sub rate-tag">${r == null ? "rate not set" : "@ " + gbp(r) + unit}</span>`;
   let f = "";
-  if (it === "coaching" || it === "umpiring") f = inp("session", it === "umpiring" ? "Match" : "Session") + numIn("hours", "Hours", "0.25") + (ownRates() ? numIn("rate", "Your rate £/hr", "0.01", "w-s") : rateTxt(itemRate(it, l), "/hr"));
+  if (it === "activity") f = inp("session", "Comment", "text", "wide", "", "Age group, training, home or away match") + numIn("hours", "Hours", "0.25") + (ownRates() ? numIn("rate", "Your rate £/hr", "0.01", "w-s") : rateTxt(itemRate(it, l), "/hr"));
+  else if (it === "coaching" || it === "umpiring") f = inp("session", it === "umpiring" ? "Match" : "Session") + numIn("hours", "Hours", "0.25") + (ownRates() ? numIn("rate", "Your rate £/hr", "0.01", "w-s") : rateTxt(itemRate(it, l), "/hr"));
   else if (it === "mileage") f = inp("from", "From") + inp("to", "To") + inp("purpose", "Purpose") + numIn("miles", "Miles one way", "1", "w-s") + `<label class="chk"><input type="checkbox" id="${id("ret")}" data-line="${i}" data-k="ret" ${l.ret ? "checked" : ""}> Return</label>` + numIn("passengers", "Colleagues", "1", "w-xs", "0") + `<span class="sub rate-tag" id="${id("ch")}"></span>`;
   else if (it === "retainer" && perSeason()){ const done = claimedSeasons(S.draft && S.draft.editingId);
     f = `<label class="fld w-s"><span>Season</span><select id="${id("season")}" data-line="${i}" data-k="season"><option value="">Choose…</option>${seasonOptions().map(o => `<option value="${o}" ${l.season === o ? "selected" : ""} ${done.has(o) && l.season !== o ? "disabled" : ""}>${seasonLabel(o)}${done.has(o) ? " (claimed)" : ""}</option>`).join("")}</select></label>`
@@ -171,28 +190,36 @@ function mixedRow(l, i, total){
   else if (it === "retainer") f = inp("description", "Which month", "text", "", "", "e.g. November retainer") + numIn("qty", "Months", "1", "w-xs", "1") + (ownRates() ? numIn("rate", "Amount £/month", "0.01", "w-s", S.me && S.me.retainer_amount != null ? String(S.me.retainer_amount) : "") : rateTxt(itemRate(it, l), "/month"));
   else f = inp("description", "What it's for", "text", "", "", "e.g. Coaching course fee") + numIn("amount", "Amount £", "0.01", "w-s");
   return `<tr><td class="cap"><input id="${id("date")}" type="date" data-line="${i}" data-k="date" value="${v("date")}" aria-label="Date"></td>
-    <td class="cap"><select id="${id("item")}" data-line="${i}" data-k="item" aria-label="What you're claiming">${Object.entries(ITEMS).map(([k, lab]) => `<option value="${k}" ${k === it ? "selected" : ""}>${lab}</option>`).join("")}</select></td>
+    <td class="cap">${itemSelect(l, i)}</td>
     <td><div class="lineflds">${f}</div></td><td class="num calc capnum" id="${id("_amt")}">–</td>
     <td class="cap"><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove line" ${total < 2 ? "disabled" : ""}>✕</button></td></tr>`;
+}
+function itemSelect(l, i){
+  const it = lineItem(l), payroll = S.draft && S.draft.type === "payroll";
+  if (!payroll) return `<select id="ln-${i}-item" data-line="${i}" data-k="item" aria-label="What you're claiming">${Object.entries(ITEMS).filter(([k]) => k !== "activity").map(([k, lab]) => `<option value="${k}" ${k === it ? "selected" : ""}>${lab}</option>`).join("")}</select>`;
+  const cur = it === "activity" ? "a:" + (l.activity_key || "") : it;
+  const groups = ACT_GROUPS.concat([...new Set(acts().map(a => a.group))].filter(g => !ACT_GROUPS.includes(g)));
+  const opt = (v, lab) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(lab)}</option>`;
+  return `<select id="ln-${i}-item" data-line="${i}" data-k="item" aria-label="Timesheet heading">${it === "activity" && !l.activity_key ? `<option value="a:" selected>Choose…</option>` : ""}${groups.map(g => { const list = acts().filter(a => (a.group || "Other") === g); return list.length ? `<optgroup label="${esc(g)}">${list.map(a => opt("a:" + a.key, a.label)).join("")}</optgroup>` : ""; }).join("")}<optgroup label="Other items">${(it === "coaching" || it === "umpiring") ? opt(it, ITEMS[it]) : ""}${opt("mileage", "Mileage")}${opt("retainer", "Coaching retainer")}${opt("other", "Other cost (£)")}</optgroup></select>`;
 }
 function mixedDetail(l){
   const it = lineItem(l);
   if (it === "mileage") return `${l.from || ""} to ${l.to || ""}${l.ret ? " and return" : ""}${l.purpose ? " – " + l.purpose : ""}${num(l.passengers) ? `, ${num(l.passengers)} colleague${num(l.passengers) > 1 ? "s" : ""}` : ""}`;
-  if (it === "coaching" || it === "umpiring") return l.session || "";
+  if (it === "coaching" || it === "umpiring" || it === "activity") return l.session || "";
   if (it === "retainer" && l.season) return `Season ${seasonLabel(l.season)}${l.description ? " – " + l.description : ""}`;
   return l.description || "";
 }
 function mixedQty(l){
   const it = lineItem(l);
   if (it === "mileage") return `${num(l.chargeable_miles)} of ${num(l.miles) * (l.ret ? 2 : 1)} mi`;
-  if (it === "coaching" || it === "umpiring") return fmtH(l.hours);
+  if (it === "coaching" || it === "umpiring" || it === "activity") return fmtH(l.hours);
   if (it === "retainer"){ if (l.period === "season" || l.season) return "1 season"; const q = num(l.qty) || 1; return `${q} month${q > 1 ? "s" : ""}`; }
   return "";
 }
 function mixedRate(l){
   const it = lineItem(l);
   if (it === "mileage") return num(l.chargeable_miles) > 0 ? `${Math.round(num(l.amount) / num(l.chargeable_miles) * 100)}p/mi` : (l.rate != null ? `${Math.round(num(l.rate) * 100)}p/mi` : "");
-  if (it === "coaching" || it === "umpiring") return l.rate != null ? gbp(l.rate) + "/hr" : "";
+  if (it === "coaching" || it === "umpiring" || it === "activity") return l.rate != null ? gbp(l.rate) + "/hr" : "";
   if (it === "retainer") return l.rate != null ? gbp(l.rate) + (l.period === "season" || l.season ? "/season" : "/month") : "";
   return "";
 }
@@ -362,7 +389,8 @@ function detailsCard(){
 }
 
 /* ---------- new claim ---------- */
-function blankDraft(type){ return {editingId:null,editingRef:"",type:type||null,budget_area:"",team:"",description:"",invoice_number:"",invoice_date:today(),pay_period:new Date().toISOString().slice(0,7),lines:[{date:today()}],attachments:[],declare:false,supplier_name:"",supplier_email:"",due_date:"",vat_invoice:false,supplier_vat_number:"",bank_name:"",bank_sort:"",bank_acct:""}; }
+function blankDraft(type){ const d = blankDraftBase(type); if (type === "payroll") d.lines = [{date: today(), item: "activity", activity_key: ""}]; return d; }
+function blankDraftBase(type){ return {editingId:null,editingRef:"",type:type||null,budget_area:"",team:"",description:"",invoice_number:"",invoice_date:today(),pay_period:new Date().toISOString().slice(0,7),lines:[{date:today()}],attachments:[],declare:false,supplier_name:"",supplier_email:"",due_date:"",vat_invoice:false,supplier_vat_number:"",bank_name:"",bank_sort:"",bank_acct:""}; }
 function viewNew(){
   if (S.lastSubmitted) return submittedView();
   if (!S.draft) S.draft = blankDraft();
@@ -376,7 +404,7 @@ function viewNew(){
   const rate = S.settings.mileage_rate;
   h += `<section class="panel" id="claimForm">
     <div class="row"><h2 style="flex:1">${esc(T.label)}</h2><span class="sub">${d.type === "supplier" ? (d.supplier_name ? "Paying " + esc(d.supplier_name) : "Paying the supplier") : "Paying " + esc(S.me.full_name)}</span></div>
-    ${isMixed(d.type) ? `<div class="notice">${esc(ratesNotice())}</div>` : ""}
+    ${isMixed(d.type) ? `<div class="notice">${esc(ratesNotice(d.type))}</div>` : ""}
     ${rateProblems(d).length ? `<div class="notice warn">${rateProblems(d).map(esc).join("<br>")}</div>` : ""}
     ${d.type === "mileage" && rate != null ? `<div class="notice">${esc(rulesText())}</div>` : ""}
     ${d.type === "mileage" && rate == null ? `<div class="notice warn">The club mileage rate hasn't been set yet, so mileage claims can't be submitted. The club admin sets it in Settings.</div>` : ""}
@@ -470,8 +498,9 @@ function validate(d){
   if (d.type === "mileage" && S.settings.mileage_rate == null) errs.push("The club mileage rate isn't set yet.");
   for (const m of rateProblems(d)) errs.push(m);
   if (isMixed(d.type)) d.lines.forEach((l, i) => {
-    const it = lineItem(l), n = `Line ${i + 1} (${ITEMS[it].toLowerCase()})`;
+    const it = lineItem(l), n = `Line ${i + 1} (${(ITEMS[it] || "").toLowerCase()})`;
     if (blank(l.date)) errs.push(`${n}: add the date.`);
+    if (it === "activity"){ const a = actByKey(l.activity_key); if (!a) errs.push(`Line ${i + 1}: choose the timesheet heading.`); else { const m = `Line ${i + 1} (${a.label})`; if (blank(l.session)) errs.push(`${m}: add a comment, e.g. age group, training, home or away match.`); if (num(l.hours) <= 0 || num(l.hours) > 24) errs.push(`${m}: hours must be between 0.25 and 24.`); if (ownRates() && num(l.rate) <= 0) errs.push(`${m}: enter your hourly rate.`); } return; }
     if (it === "coaching" || it === "umpiring"){ if (blank(l.session)) errs.push(`${n}: say which ${it === "umpiring" ? "match" : "session"}.`); if (num(l.hours) <= 0) errs.push(`${n}: add the hours.`); if (ownRates() && num(l.rate) <= 0) errs.push(`${n}: enter your hourly rate.`); }
     else if (it === "mileage"){ if (blank(l.from) || blank(l.to)) errs.push(`${n}: add where you drove from and to.`); if (blank(l.purpose)) errs.push(`${n}: add the purpose.`); if (num(l.miles) <= 0) errs.push(`${n}: add the miles.`); }
     else if (it === "retainer" && perSeason()){ if (blank(l.season)) errs.push(`${n}: choose the season.`); else if (claimedSeasons(d.editingId).has(l.season)) errs.push(`${n}: you've already claimed your ${seasonLabel(l.season)} season retainer.`); else if (d.lines.filter(x => lineItem(x) === "retainer" && x.season === l.season).length > 1) errs.push(`${n}: the ${seasonLabel(l.season)} retainer is on this claim twice.`); if (ownRates() && blank(l.rate) && (!S.me || S.me.retainer_amount == null)) errs.push(`${n}: enter the retainer amount.`); }
@@ -489,6 +518,7 @@ async function submitDraft(){
   if (errs.length){ box.innerHTML = errs.map(esc).join("<br>"); box.hidden = false; box.scrollIntoView({block:"nearest"}); return; }
   box.hidden = true; const btn = $("#submitBtn"); btn.disabled = true; btn.textContent = "Submitting…";
   const mixedLine = l => { const it = lineItem(l), o = {date: l.date, item: it};
+    if (it === "activity"){ o.activity_key = l.activity_key; o.session = String(l.session || "").trim(); o.hours = num(l.hours); if (ownRates()) o.rate = num(l.rate); return o; }
     if (it === "coaching" || it === "umpiring"){ o.session = String(l.session || "").trim(); o.hours = num(l.hours); if (ownRates()) o.rate = num(l.rate); }
     else if (it === "mileage"){ o.from = String(l.from || "").trim(); o.to = String(l.to || "").trim(); o.purpose = String(l.purpose || "").trim(); o.miles = num(l.miles); o.ret = !!l.ret; o.passengers = Math.max(0, Math.floor(num(l.passengers))); }
     else if (it === "retainer"){ o.description = String(l.description || "").trim(); if (perSeason()) o.season = l.season; else o.qty = num(l.qty) || 1; if (ownRates() && !blank(l.rate)) o.rate = num(l.rate); }
@@ -529,6 +559,14 @@ function stepsHtml(c){
   const next = c.status === "returned" ? -1 : steps.findIndex(x => !x[1]);
   return `<ol class="track" aria-label="Progress">${steps.map((x,i) => `<li class="${x[1] ? "done" : i === next ? "next" : ""}"><b>${x[1] ? "✓ " : ""}${esc(x[0])}</b>${x[2] ? esc(x[2]) : (i === next ? "Waiting" : "")}</li>`).join("")}</ol>`;
 }
+function hoursSummary(c){
+  const rows = new Map();
+  for (const l of (c.lines || [])){ const it = lineItem(l); if (!["activity","coaching","umpiring"].includes(it)) continue;
+    const k = itemLabel(l) + "|" + num(l.rate), x = rows.get(k) || {label: itemLabel(l), rate: num(l.rate), h: 0, amt: 0}; x.h += num(l.hours); x.amt += num(l.amount); rows.set(k, x); }
+  if (!rows.size) return "";
+  const list = [...rows.values()], th = list.reduce((a, x) => a + x.h, 0), ta = list.reduce((a, x) => a + x.amt, 0);
+  return `<div><h3 style="margin:4px 0 8px;font-size:.95rem">Hours by timesheet heading</h3><div class="tablebox"><table><thead><tr><th>Heading</th><th class="num">Total hours</th><th class="num">Hourly rate</th><th class="num">Total pay</th></tr></thead><tbody>${list.map(x => `<tr><td>${esc(x.label)}</td><td class="num">${esc(fmtH(x.h))}</td><td class="num">${gbp(x.rate)}</td><td class="num">${gbp(x.amt)}</td></tr>`).join("")}<tr><td><strong>Total</strong></td><td class="num"><strong>${esc(fmtH(th))}</strong></td><td></td><td class="num"><strong>${gbp(ta)}</strong></td></tr></tbody></table></div></div>`;
+}
 function claimDetail(c, open){
   const cols = colsFor(c.type, c.vat_invoice);
   const cell = (k, l) => {
@@ -548,7 +586,7 @@ function claimDetail(c, open){
     <p style="margin:0">${esc(c.description)}</p>
     <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "supplier" ? `${c.due_date ? `<span>Due ${fmtDate(c.due_date)}</span>` : ""}${c.supplier_email ? `<span>${esc(c.supplier_email)}</span>` : ""}${c.vat_invoice ? `<span>VAT no. ${esc(c.supplier_vat_number)} · Net ${gbp(c.net_total)} + VAT ${gbp(c.vat_total)}</span>` : `<span>Not a VAT invoice</span>`}` : ""}${(c.type === "mileage" || (isMixed(c.type) && c.mileage_rules)) ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
     ${isMixed(c.type) ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Item</th><th>Details</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
-    <tbody>${(c.lines || []).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(ITEMS[lineItem(l)])}${l.own_rate ? ` <span class="pill pending" title="Rate entered by the claimant">own rate</span>` : ""}</td><td>${esc(mixedDetail(l))}</td><td class="num">${esc(mixedQty(l))}</td><td class="num">${esc(mixedRate(l))}</td><td class="num">${gbp(l.amount)}</td></tr>`).join("")}</tbody></table></div>`
+    <tbody>${(c.lines || []).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(itemLabel(l))}${l.own_rate ? ` <span class="pill pending" title="Rate entered by the claimant">own rate</span>` : ""}</td><td>${esc(mixedDetail(l))}</td><td class="num">${esc(mixedQty(l))}</td><td class="num">${esc(mixedRate(l))}</td><td class="num">${gbp(l.amount)}</td></tr>`).join("")}</tbody></table></div>${c.type === "payroll" ? hoursSummary(c) : ""}`
     : `<div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${NUMERIC_COLS.includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
     <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}</tr>`).join("")}</tbody></table></div>`}
     ${c.attachments && c.attachments.length ? `<div class="files">${filesHtml(c.attachments, false)}</div>` : ""}
@@ -639,7 +677,7 @@ async function exportCsv(all){
       const detail = mix ? mixedDetail(l) : c.type === "supplier" ? l.item : c.type === "mileage" ? `${l.from} to ${l.to}${l.ret ? " and return" : ""} – ${l.purpose}` : c.type === "expense" ? `${l.item}${l.supplier ? " (" + l.supplier + ")" : ""}` : l.session;
       rows.push([c.ref, STATUS[c.status].label, TYPES[c.type].short, personName(c.claimant), p.email || "", c.budget_area, c.team, c.description, c.invoice_number, c.invoice_date || "", c.pay_period,
         isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), c.second_approver ? personName(c.second_approver) : "", isoDay(c.second_approved_at),
-        isoDay(c.processed_at), c.payment_ref || "", l.date, detail, mix ? ITEMS[lineItem(l)] : (l.activity || ""), mix && lineItem(l) === "retainer" ? "" : (l.hours || ""), l.rate ?? (miles ? c.mileage_rate : "") ?? "",
+        isoDay(c.processed_at), c.payment_ref || "", l.date, detail, mix ? itemLabel(l) : (l.activity || ""), mix && lineItem(l) === "retainer" ? "" : (l.hours || ""), l.rate ?? (miles ? c.mileage_rate : "") ?? "",
         miles ? num(l.miles) * (l.ret ? 2 : 1) : "", miles ? (l.passengers || 0) : "", miles ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.total, (c.attachments || []).map(a => a.name).join("; "),
         c.type === "supplier" ? c.supplier_name : personName(c.claimant), c.supplier_vat_number || "", c.due_date || "", c.vat_invoice ? "Yes" : "No",
         c.type === "supplier" ? (l.net ?? "") : "", c.vat_invoice ? (l.vat_rate ?? "") : "", c.vat_invoice ? (l.vat ?? "") : "", c.net_total ?? c.total, c.vat_total ?? 0, l.own_rate ? "Yes" : ""]
@@ -667,6 +705,10 @@ function viewPeople(){
       <label>Retainer £ <input type="number" step="0.01" min="0" inputmode="decimal" data-r="retainer" value="${p.retainer_amount == null ? "" : esc(p.retainer_amount)}" placeholder="none" style="width:7.5em"></label>
       <label>Paid <select data-r="retainer-period" style="width:auto"><option value="month" ${p.retainer_period !== "season" ? "selected" : ""}>per month</option><option value="season" ${p.retainer_period === "season" ? "selected" : ""}>once per season</option></select></label>
       <label><input type="checkbox" data-r="own" ${p.own_rates ? "checked" : ""}> Sets own rates</label>
+      <details class="actrates"><summary>Payroll rates by timesheet heading${Object.keys(p.activity_rates || {}).length ? ` (${Object.keys(p.activity_rates).length} set)` : ""}</summary>
+        <p class="sub" style="margin:6px 0">Only fill in headings where this person is paid differently. Blank uses the club rate for that heading.</p>
+        <div class="actgrid">${acts().map(a => `<label>${esc(a.label)}<input type="number" step="0.01" min="0" inputmode="decimal" data-actrate="${esc(a.key)}" value="${p.activity_rates && p.activity_rates[a.key] != null ? esc(p.activity_rates[a.key]) : ""}" placeholder="${a.rate != null && a.rate !== "" ? "club " + esc(a.rate) : (x => x != null ? "uses " + esc(x) : "not set")(a.group === "Umpiring" ? (p.umpiring_rate ?? S.settings.umpiring_rate) : (p.coaching_rate ?? S.settings.coaching_rate))}"></label>`).join("")}</div>
+      </details>
     </div>
     <div style="display:flex;flex-direction:column;gap:6px;align-items:stretch">
       <button class="btn small primary" data-act="save-person" data-id="${esc(p.id)}">Save</button>
@@ -691,6 +733,9 @@ async function savePerson(id){
     p_retainer_amount: rateVal(q('[data-r="retainer"]').value), p_own_rates: q('[data-r="own"]').checked, p_retainer_period: q('[data-r="retainer-period"]').value};
   const {error} = await S.sb.rpc("admin_update_user", args);
   if (error){ toast(errText(error)); return; }
+  const ar = {}; r.querySelectorAll("[data-actrate]").forEach(i => { const v = String(i.value).trim(); if (v !== "") ar[i.dataset.actrate] = String(Math.round(num(v) * 100) / 100); });
+  const e2 = (await S.sb.rpc("admin_set_activity_rates", {p_user: id, p_rates: ar})).error;
+  if (e2){ toast(errText(e2)); return; }
   toast("Saved " + (S.people[id] && S.people[id].full_name || "")); await loadAll(false);
 }
 
@@ -705,8 +750,16 @@ function viewSettings(){
     <label>Club coaching rate (£ per hour) <span class="hint">Used for anyone without their own rate in People</span><input id="sCRate" type="number" step="0.01" min="0" inputmode="decimal" value="${S.settings.coaching_rate == null ? "" : esc(S.settings.coaching_rate)}"></label>
     <label>Club umpiring rate (£ per hour) <span class="hint">Used for anyone without their own rate in People</span><input id="sURate" type="number" step="0.01" min="0" inputmode="decimal" value="${S.settings.umpiring_rate == null ? "" : esc(S.settings.umpiring_rate)}"></label>
     <label>Budget areas <span class="hint">One per line</span><textarea id="sAreas" rows="7">${esc((S.settings.budget_areas || DEFAULT_AREAS).join("\n"))}</textarea></label>
-  </div><div class="row end"><button class="btn primary" data-act="save-settings">Save settings</button></div></section>`;
+  </div><div class="row end"><button class="btn primary" data-act="save-settings">Save settings</button></div></section>
+  <section class="panel" id="actEditor">
+    <div><h3>Payroll timesheet headings</h3><p class="sub" style="margin:4px 0 0">The headings coaches choose from on payroll claims, with the club's hourly rate for each. A blank rate uses the coaching rate above (the umpiring rate for the Umpiring group). Set a different rate for one person in People.</p></div>
+    <div class="tablebox"><table class="lines"><thead><tr><th>Heading</th><th>Group</th><th class="num">Club rate £/hr</th><th></th></tr></thead><tbody>
+    ${actDraft().map((a, i) => `<tr><td><input data-act-i="${i}" data-act-k="label" value="${esc(a.label)}" aria-label="Heading name"></td><td><select data-act-i="${i}" data-act-k="group" aria-label="Group">${ACT_GROUPS.concat(ACT_GROUPS.includes(a.group) || !a.group ? [] : [a.group]).map(g => `<option ${g === a.group ? "selected" : ""}>${esc(g)}</option>`).join("")}</select></td><td><input type="number" step="0.01" min="0" inputmode="decimal" class="w-s" data-act-i="${i}" data-act-k="rate" value="${a.rate == null ? "" : esc(a.rate)}" placeholder="${(a.group === "Umpiring" ? S.settings.umpiring_rate : S.settings.coaching_rate) != null ? "uses " + esc(a.group === "Umpiring" ? S.settings.umpiring_rate : S.settings.coaching_rate) : "not set"}" aria-label="Club rate"></td><td><button class="btn small danger" data-act="act-del" data-i="${i}" aria-label="Remove heading">✕</button></td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="row" style="justify-content:space-between"><button class="btn small" data-act="act-add">+ Add heading</button><button class="btn primary" data-act="act-save">Save headings</button></div>
+  </section>`;
 }
+function actDraft(){ if (!S.actDraft) S.actDraft = JSON.parse(JSON.stringify(acts())); return S.actDraft; }
 
 /* ---------- uploads ---------- */
 async function uploadFiles(files){
@@ -794,9 +847,9 @@ document.addEventListener("click", async e => {
     case "auth": S.authView = b.dataset.v; S.authMsg = ""; render(); break;
     case "signout": await S.sb.auth.signOut(); break;
     case "reload": await loadAll(false); render(); break;
-    case "tab": S.tab = b.dataset.tab; if (S.tab !== "new") S.lastSubmitted = null; S.editingDetails = false; render(); window.scrollTo(0,0); break;
+    case "tab": S.actDraft = null; S.tab = b.dataset.tab; if (S.tab !== "new") S.lastSubmitted = null; S.editingDetails = false; render(); window.scrollTo(0,0); break;
     case "type": { const k = S.draft; S.draft = blankDraft(b.dataset.type); if (k){ S.draft.budget_area = k.budget_area; S.draft.team = k.team; S.draft.description = k.description; } saveLocalDraft(); render(); break; }
-    case "add-line": { const last = S.draft.lines[S.draft.lines.length - 1] || {}; const n = {date: last.date || today()}; if (last.activity) n.activity = last.activity; if (last.item) n.item = last.item; S.draft.lines.push(n); render(); break; }
+    case "add-line": { const last = S.draft.lines[S.draft.lines.length - 1] || {}; const n = {date: last.date || today()}; if (last.activity) n.activity = last.activity; if (last.item) n.item = last.item; if (last.item === "activity") n.activity_key = last.activity_key || ""; S.draft.lines.push(n); render(); break; }
     case "del-line": S.draft.lines.splice(+b.dataset.i, 1); render(); break;
     case "del-file": { const [gone] = S.draft.attachments.splice(+b.dataset.i, 1); $("#fileList").innerHTML = filesHtml(S.draft.attachments, true); saveLocalDraft();
       if (gone && !S.draft.editingId) S.sb.storage.from("receipts").remove([gone.path]); break; }
@@ -882,15 +935,28 @@ document.addEventListener("click", async e => {
     case "export": exportCsv(false); break;
     case "export-all": exportCsv(true); break;
     case "save-person": savePerson(id); break;
+    case "act-add": actDraft().push({key: "", label: "", group: "Programmes", rate: null}); render(); { const ins = document.querySelectorAll('[data-act-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); } break;
+    case "act-del": actDraft().splice(+b.dataset.i, 1); render(); break;
+    case "act-save": {
+      const used = new Set(), list = [];
+      for (const a of actDraft()){ const label = String(a.label || "").trim(); if (!label){ toast("Every heading needs a name"); return; }
+        let key = a.key || label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 34) || "heading";
+        while (used.has(key)) key = key.slice(0, 34) + "_" + Math.random().toString(36).slice(2, 5);
+        used.add(key); list.push({key, label, group: a.group || "Programmes", rate: blank(a.rate) ? null : Math.round(num(a.rate) * 100) / 100}); }
+      const {error} = await S.sb.rpc("admin_update_payroll_activities", {p_list: list});
+      if (error){ toast(errText(error)); break; }
+      S.actDraft = null; toast("Headings saved"); await loadAll(false); render(); break;
+    }
     case "save-settings": { const rate = $("#sRate").value.trim();
       rpc("admin_update_settings", {p_mileage_rate: rate === "" ? null : num(rate), p_budget_areas: $("#sAreas").value.split("\n").map(x => x.trim()).filter(Boolean), p_coaching_rate: rateVal($("#sCRate").value), p_umpiring_rate: rateVal($("#sURate").value), p_mileage_free_miles: num($("#sFree").value), p_mileage_passenger_rate: num($("#sPax").value), p_mileage_free_basis: $("#sBasis").value}, "Settings saved"); break; }
   }
 });
 function onField(e){
+  if (e.target.dataset && e.target.dataset.actI != null){ const row = actDraft()[+e.target.dataset.actI]; if (row) row[e.target.dataset.actK] = e.target.value; return; }
   const t = e.target, d = S.draft; if (!d || !t.closest("#claimForm")) return;
   const val = t.type === "checkbox" ? t.checked : t.value;
   if (t.dataset.f) { d[t.dataset.f] = val; if (t.dataset.f === "vat_invoice" && e.type === "change"){ render(); return; } }
-  else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ l[t.dataset.k] = val; if (t.dataset.k === "item"){ saveLocalDraft(); render(); return; } recalc(); } }
+  else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ if (t.dataset.k === "item"){ if (String(val).startsWith("a:")){ l.item = "activity"; l.activity_key = String(val).slice(2); } else { l.item = val; delete l.activity_key; } saveLocalDraft(); render(); return; } l[t.dataset.k] = val; recalc(); } }
   clearTimeout(onField._t); onField._t = setTimeout(saveLocalDraft, 400);
 }
 document.addEventListener("input", onField);

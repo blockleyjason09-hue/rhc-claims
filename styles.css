@@ -157,3 +157,13 @@ main.legal{max-width:760px;padding-block:28px 64px;display:block}
 .rate-tag{white-space:nowrap}
 .lines.mixed select{min-width:150px}
 .lineflds .fld select{width:100%;min-width:0;font-size:1rem;font-weight:400;letter-spacing:0;text-transform:none;color:var(--fg)}
+/* timesheet headings */
+.lineflds .fld.wide{flex:2 1 150px}
+.lines.mixed select{min-width:215px;max-width:250px}
+details.actrates{flex-basis:100%}
+details.actrates summary{font-size:.9rem}
+.actgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px 12px}
+.actgrid label{font-size:.82rem;font-weight:600;gap:3px}
+.actgrid input{padding:5px 8px}
+.personrow .checks .actgrid label{flex-direction:column;align-items:stretch;font-size:.8rem;gap:3px}
+.personrow .checks .actgrid input{width:100%}
