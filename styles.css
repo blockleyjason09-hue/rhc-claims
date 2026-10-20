@@ -175,3 +175,8 @@ details.actrates summary{font-size:.9rem}
 .capgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 12px;margin-top:6px}
 .personrow .checks .capgrid label{font-size:.88rem}
 .personrow .checks label.fin{flex-basis:100%}
+.payby{flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:.9rem}
+.payby > span{font-weight:600}
+.personrow .checks .payby label{font-weight:400}
+.personrow .checks .payby label{flex-direction:row;align-items:center;gap:6px;white-space:nowrap}
+.payby input[type="radio"]{width:auto;min-width:0;margin:0}
