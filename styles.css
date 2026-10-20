@@ -171,3 +171,7 @@ details.actrates summary{font-size:.9rem}
 .bkfilters{gap:10px}
 .bkgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px 12px}
 .bkgrid label{font-size:.82rem}
+/* section captains */
+.capgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 12px;margin-top:6px}
+.personrow .checks .capgrid label{font-size:.88rem}
+.personrow .checks label.fin{flex-basis:100%}
