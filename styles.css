@@ -180,3 +180,9 @@ details.actrates summary{font-size:.9rem}
 .personrow .checks .payby label{font-weight:400}
 .personrow .checks .payby label{flex-direction:row;align-items:center;gap:6px;white-space:nowrap}
 .payby input[type="radio"]{width:auto;min-width:0;margin:0}
+/* budget allocation at 2nd approval */
+.alloc{display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--line);padding-top:12px}
+.alloc table select{min-width:9em;width:100%}
+.alloc td:nth-child(4) select{min-width:14em}
+.alloc .allrow td{background:var(--surface-2)}
+#blEditor input[type=checkbox]{width:auto;margin-top:12px}

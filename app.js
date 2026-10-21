@@ -35,7 +35,7 @@ const STATUS = {
 
 const S = {sb:null,user:null,me:null,settings:{mileage_rate:null,budget_areas:DEFAULT_AREAS},claims:[],people:{},names:{},banks:{},payees:{},myBank:null,viewAsCoach:false,
   tab:null,draft:null,authView:"signin",authMsg:"",recovery:false,lastSubmitted:null,decideOpen:null,confirmWithdraw:null,
-  bkFilter:"ready",bk:{month:"",type:"",area:"",section:"",q:"",sort:"new"},editingDetails:false,channel:null,loaded:false};
+  bkFilter:"ready",bk:{month:"",type:"",area:"",section:"",entity:"",bline:"",q:"",sort:"new"},editingDetails:false,channel:null,loaded:false};
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -60,8 +60,12 @@ const myCaptain = () => coachView() ? [] : ((S.me && S.me.captain_sections) || [
 const isFinance = () => !coachView() && !!(S.me && S.me.is_finance);
 const sectionHasCaptain = k => Object.values(S.people).some(p => p.active && (p.captain_sections || []).includes(k));
 const isApproverAny = () => myCaptain().length > 0 || isFinance();
-function canFirstApprove(c){ return c.status === "pending" && !!c.section && (myCaptain().includes(c.section) || (isFinance() && !sectionHasCaptain(c.section))); }
-function canSecondApprove(c){ return c.status === "first_approved" && isFinance() && c.first_approver !== S.me.id; }
+function canFirstApprove(c){ return c.status === "pending" && !!c.section && (myCaptain().includes(c.section) || isFinance()); }
+function canSecondApprove(c){ return c.status === "first_approved" && isFinance() && !(c.claimant === S.me.id && c.first_approver === S.me.id); }
+const budgetLines = () => Array.isArray(S.settings.budget_lines) ? S.settings.budget_lines : [];
+const blName = x => x ? (x.code ? x.code + " " : "") + x.label : "";
+const blByKey = k => budgetLines().find(x => x.key === k);
+const chargeText = l => l && l.charge_to ? `${l.charge_to} · ${(l.budget_code ? l.budget_code + " " : "") + (l.budget_label || "")}` : "";
 const isBookkeeper = () => !coachView() && !!(S.me && S.me.is_bookkeeper);
 const isAdmin = () => !coachView() && !!(S.me && S.me.is_admin);
 const canLogSuppliers = () => !coachView() && !!(S.me && (S.me.is_admin || S.me.is_bookkeeper || S.me.can_log_suppliers));
@@ -209,6 +213,13 @@ function mixedDetail(l){
   if (it === "coaching" || it === "umpiring" || it === "activity") return l.session || "";
   if (it === "retainer" && l.season) return `Season ${seasonLabel(l.season)}${l.description ? " – " + l.description : ""}`;
   return l.description || "";
+}
+function lineText(c, l){
+  if (isMixed(c.type)){ const d = mixedDetail(l); return itemLabel(l) + (d ? " – " + d : ""); }
+  if (c.type === "supplier") return l.item || "";
+  if (c.type === "mileage") return `${l.from || ""} to ${l.to || ""}${l.ret ? " and return" : ""}${l.purpose ? " – " + l.purpose : ""}`;
+  if (c.type === "expense") return `${l.item || ""}${l.supplier ? " (" + l.supplier + ")" : ""}`;
+  return l.session || l.description || "";
 }
 function mixedQty(l){
   const it = lineItem(l);
@@ -557,7 +568,7 @@ function stepsHtml(c){
   const paid = c.status === "processed";
   const steps = [
     ["Submitted", true, fmtDate(c.updated_at || c.submitted_at)],
-    ["1st approval · captain", !!c.first_approver, c.first_approver ? personName(c.first_approver) + ", " + fmtDate(c.first_approved_at) : ""],
+    ["1st approval · captain or finance", !!c.first_approver, c.first_approver ? personName(c.first_approver) + ", " + fmtDate(c.first_approved_at) : ""],
     ["2nd approval · finance", !!c.second_approver, c.second_approver ? personName(c.second_approver) + ", " + fmtDate(c.second_approved_at) : ""],
     ["Paid", paid, paid ? fmtDate(c.processed_at) : (c.status === "approved" ? "With bookkeeper" : "")]
   ];
@@ -573,7 +584,8 @@ function hoursSummary(c){
   return `<div><h3 style="margin:4px 0 8px;font-size:.95rem">Hours by timesheet heading</h3><div class="tablebox"><table><thead><tr><th>Heading</th><th class="num">Total hours</th><th class="num">Hourly rate</th><th class="num">Total pay</th></tr></thead><tbody>${list.map(x => `<tr><td>${esc(x.label)}</td><td class="num">${esc(fmtH(x.h))}</td><td class="num">${gbp(x.rate)}</td><td class="num">${gbp(x.amt)}</td></tr>`).join("")}<tr><td><strong>Total</strong></td><td class="num"><strong>${esc(fmtH(th))}</strong></td><td></td><td class="num"><strong>${gbp(ta)}</strong></td></tr></tbody></table></div></div>`;
 }
 function claimDetail(c, open){
-  const cols = colsFor(c.type, c.vat_invoice);
+  const cols = colsFor(c.type, c.vat_invoice), coded = (c.lines || []).some(l => l.charge_to);
+  const chg = l => coded ? `<td>${esc(chargeText(l))}</td>` : "", chgH = coded ? `<th>Charged to</th>` : "";
   const cell = (k, l) => {
     if (k.t === "calc") return `<td class="num">${gbp(l.amount)}</td>`;
     if (k.t === "rate") return `<td class="num">${gbp(l.rate)}</td>`;
@@ -590,10 +602,10 @@ function claimDetail(c, open){
     <div style="display:flex;flex-direction:column;gap:10px">
     <p style="margin:0">${esc(c.description)}</p>
     <div class="meta">${c.invoice_number ? `<span>Invoice ${esc(c.invoice_number)}${c.invoice_date ? " · " + fmtDate(c.invoice_date) : ""}</span>` : ""}${c.pay_period ? `<span>Pay period ${esc(c.pay_period)}</span>` : ""}${c.type === "supplier" ? `${c.due_date ? `<span>Due ${fmtDate(c.due_date)}</span>` : ""}${c.supplier_email ? `<span>${esc(c.supplier_email)}</span>` : ""}${c.vat_invoice ? `<span>VAT no. ${esc(c.supplier_vat_number)} · Net ${gbp(c.net_total)} + VAT ${gbp(c.vat_total)}</span>` : `<span>Not a VAT invoice</span>`}` : ""}${(c.type === "mileage" || (isMixed(c.type) && c.mileage_rules)) ? `<span>${esc(c.mileage_rules ? rulesText(c.mileage_rules) : "Rate " + gbp(c.mileage_rate) + "/mile")}</span>` : ""}</div>
-    ${isMixed(c.type) ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Item</th><th>Details</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
-    <tbody>${(c.lines || []).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(itemLabel(l))}${l.own_rate ? ` <span class="pill pending" title="Rate entered by the claimant">own rate</span>` : ""}</td><td>${esc(mixedDetail(l))}</td><td class="num">${esc(mixedQty(l))}</td><td class="num">${esc(mixedRate(l))}</td><td class="num">${gbp(l.amount)}</td></tr>`).join("")}</tbody></table></div>${c.type === "payroll" ? hoursSummary(c) : ""}`
-    : `<div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${NUMERIC_COLS.includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}</tr></thead>
-    <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}</tr>`).join("")}</tbody></table></div>`}
+    ${isMixed(c.type) ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Item</th><th>Details</th><th class="num">Quantity</th><th class="num">Rate</th><th class="num">Amount</th>${chgH}</tr></thead>
+    <tbody>${(c.lines || []).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(itemLabel(l))}${l.own_rate ? ` <span class="pill pending" title="Rate entered by the claimant">own rate</span>` : ""}</td><td>${esc(mixedDetail(l))}</td><td class="num">${esc(mixedQty(l))}</td><td class="num">${esc(mixedRate(l))}</td><td class="num">${gbp(l.amount)}</td>${chg(l)}</tr>`).join("")}</tbody></table></div>${c.type === "payroll" ? hoursSummary(c) : ""}`
+    : `<div class="tablebox"><table><thead><tr>${cols.map(k => `<th class="${NUMERIC_COLS.includes(k.t) ? "num" : ""}">${esc(k.l)}</th>`).join("")}${chgH}</tr></thead>
+    <tbody>${(c.lines || []).map(l => `<tr>${cols.map(k => cell(k, l)).join("")}${chg(l)}</tr>`).join("")}</tbody></table></div>`}
     ${c.attachments && c.attachments.length ? `<div class="files">${filesHtml(c.attachments, false)}</div>` : ""}
     </div></details>`;
 }
@@ -628,8 +640,8 @@ function viewApprove(){
   const list = toApprove();
   const decided = S.claims.filter(c => c.first_approver === S.me.id || c.second_approver === S.me.id || c.returned_by === S.me.id).slice(0, 20);
   const caps = myCaptain().map(sectionLabel).filter(Boolean);
-  const role = [caps.length ? `You give the 1st approval for ${caps.join(", ")}` : "", isFinance() ? `${caps.length ? "and" : "You give"} the 2nd (finance) approval for every section` : ""].filter(Boolean).join(" ");
-  let h = `<div><h2>To approve</h2><p class="lede">${esc(role)}. The 1st approval comes from a section captain and the 2nd from a finance approver. You can approve your own claim, but the two approvals must come from two different people.</p></div>`;
+  const role = [caps.length ? `You give the 1st approval for ${caps.join(", ")}` : "", isFinance() ? `${caps.length ? "and" : "You give"} the 1st or 2nd (finance) approval for every section` : ""].filter(Boolean).join(" ");
+  let h = `<div><h2>To approve</h2><p class="lede">${esc(role)}. The 1st approval comes from a section captain or a finance approver; the 2nd always from a finance approver, who charges each line to RHC or GARC and a budget line. A finance approver can give both approvals, except on their own claim.</p></div>`;
   h += list.length ? `<div class="claims">${list.map(c => claimCard(c, decideBox(c), true)).join("")}</div>` : `<div class="empty">Nothing waiting for you. You'll get an email when a claim needs your approval.</div>`;
   if (decided.length) h += `<div><h3 style="margin:12px 0 8px">Recently decided by you</h3><div class="tablebox"><table><thead><tr><th>Claim</th><th>Claimant</th><th>Your decision</th><th>Now</th><th class="num">Value</th></tr></thead><tbody>${decided.map(c => {
     const what = c.returned_by === S.me.id ? "Returned " + fmtDate(c.returned_at) : c.first_approver === S.me.id ? "1st approval " + fmtDate(c.first_approved_at) : "2nd approval " + fmtDate(c.second_approved_at);
@@ -641,7 +653,41 @@ function viewApprove(){
 function decideBox(c){
   if (S.decideOpen === c.id) return `<div class="decide"><label>Reason for returning <span class="hint">The claimant sees this and can fix and resubmit.</span><textarea id="rejNote-${esc(c.id)}"></textarea></label><div class="row end"><button class="btn" data-act="reject-cancel">Cancel</button><button class="btn danger" data-act="reject-yes" data-id="${esc(c.id)}">Return claim</button></div></div>`;
   const second = c.status === "first_approved";
-  return `<div class="decide row end" style="flex-direction:row">${c.claimant === S.me.id ? `<span class="sub" style="margin-right:auto">This is your own claim.</span>` : `<button class="btn danger" data-act="reject" data-id="${esc(c.id)}">Return to claimant</button>`}<button class="btn good" data-act="approve" data-id="${esc(c.id)}">${second ? "Give 2nd approval (finance)" : "Give 1st approval (captain)"} · ${headline(c)}</button></div>`;
+  return `${second ? allocBox(c) : ""}<div class="decide row end" style="flex-direction:row">${c.claimant === S.me.id ? `<span class="sub" style="margin-right:auto">This is your own claim.</span>` : `<button class="btn danger" data-act="reject" data-id="${esc(c.id)}">Return to claimant</button>`}<button class="btn good" data-act="approve" data-id="${esc(c.id)}">${second ? "Give 2nd approval (finance)" : myCaptain().includes(c.section) ? "Give 1st approval (captain)" : "Give 1st approval (finance)"} · ${headline(c)}</button></div>`;
+}
+
+function allocFor(c){
+  S.alloc = S.alloc || {};
+  const n = (c.lines || []).length;
+  if (!S.alloc[c.id] || S.alloc[c.id].length !== n) S.alloc[c.id] = (c.lines || []).map(l => ({entity: l.charge_to || "", line: l.budget_line || ""}));
+  return S.alloc[c.id];
+}
+function allocOpts(ent, cur){
+  const list = budgetLines().filter(x => !ent || (ent === "RHC" ? x.rhc : x.garc));
+  return `<option value="">Choose budget line…</option>` + list.map(x => `<option value="${esc(x.key)}" ${x.key === cur ? "selected" : ""}>${esc(blName(x))}</option>`).join("");
+}
+function entOpts(cur){ return `<option value="">RHC or GARC…</option>` + ["RHC","GARC"].map(v => `<option ${v === cur ? "selected" : ""}>${v}</option>`).join(""); }
+function allocBox(c){
+  const a = allocFor(c), lines = c.lines || [], id = esc(c.id);
+  const sum = e => lines.reduce((t, l, i) => t + (a[i].entity === e ? num(l.amount) : 0), 0), left = a.filter(x => !x.entity || !x.line).length;
+  const all = lines.length > 1 ? `<tr class="allrow"><td colspan="2"><strong>All lines</strong> <span class="sub">sets every line at once</span></td><td><select data-alloc="${id}" data-ai="all" data-ak="entity" aria-label="Charge all lines to">${entOpts("")}</select></td><td><select data-alloc="${id}" data-ai="all" data-ak="line" aria-label="Budget line for all lines">${allocOpts("", "")}</select></td></tr>` : "";
+  return `<div class="alloc"><div><strong>Charge each line</strong><p class="sub" style="margin:2px 0 0">Choose RHC or GARC and the budget line for every line before giving the 2nd approval.</p></div>
+    <div class="tablebox"><table><thead><tr><th>Line</th><th class="num">Amount</th><th>Charge to</th><th>Budget line</th></tr></thead><tbody>${all}
+    ${lines.map((l, i) => `<tr><td>${esc(lineText(c, l))}${l.date ? `<div class="sub">${fmtDate(l.date)}</div>` : ""}</td><td class="num">${c.type === "payroll" && !num(l.amount) ? esc(fmtH(l.hours)) : gbp(l.amount)}</td>
+      <td><select data-alloc="${id}" data-ai="${i}" data-ak="entity" aria-label="Line ${i + 1}: charge to">${entOpts(a[i].entity)}</select></td>
+      <td><select data-alloc="${id}" data-ai="${i}" data-ak="line" aria-label="Line ${i + 1}: budget line">${allocOpts(a[i].entity, a[i].line)}</select></td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="row" style="gap:6px 18px"><span class="sub">RHC ${gbp(sum("RHC"))}</span><span class="sub">GARC ${gbp(sum("GARC"))}</span>${left ? `<span class="sub" style="color:var(--warn-ink,inherit)">${left} line${left > 1 ? "s" : ""} still to charge</span>` : `<span class="sub">✓ Every line charged</span>`}</div></div>`;
+}
+function onAlloc(e){
+  const t = e.target; if (!t.dataset || t.dataset.alloc == null) return false;
+  if (e.type !== "change") return true;
+  const c = S.claims.find(x => x.id === t.dataset.alloc); if (!c) return true;
+  const a = allocFor(c), k = t.dataset.ak, v = t.value;
+  const set = x => { if (k === "entity"){ x.entity = v; const b = blByKey(x.line); if (b && v && !(v === "RHC" ? b.rhc : b.garc)) x.line = ""; }
+    else { x.line = v; const b = blByKey(v); if (b && !x.entity && b.rhc !== b.garc) x.entity = b.rhc ? "RHC" : "GARC"; if (b && x.entity && !(x.entity === "RHC" ? b.rhc : b.garc)) x.entity = b.rhc ? "RHC" : "GARC"; } };
+  if (t.dataset.ai === "all") a.forEach(set); else set(a[+t.dataset.ai]);
+  render(); return true;
 }
 
 /* ---------- bookkeeper ---------- */
@@ -658,13 +704,14 @@ const payeeName = c => c.type === "supplier" ? c.supplier_name : personName(c.cl
 function bkFiltered(){
   const F = S.bk, q = (F.q || "").trim().toLowerCase();
   let list = bkSet(S.bkFilter).filter(c => (!F.month || claimMonth(c) === F.month) && (!F.type || c.type === F.type) && (!F.area || c.budget_area === F.area) && (!F.section || c.section === F.section)
+    && (!F.entity || (c.lines || []).some(l => l.charge_to === F.entity)) && (!F.bline || (c.lines || []).some(l => l.budget_line === F.bline && (!F.entity || l.charge_to === F.entity)))
     && (!q || [payeeName(c), personName(c.claimant), c.ref, c.description, c.team, c.invoice_number].join(" ").toLowerCase().includes(q)));
   const by = {new: (a, b) => String(b.submitted_at).localeCompare(String(a.submitted_at)), old: (a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)),
     high: (a, b) => num(b.total) - num(a.total), low: (a, b) => num(a.total) - num(b.total),
     name: (a, b) => String(payeeName(a)).localeCompare(String(payeeName(b))), type: (a, b) => TYPES[a.type].label.localeCompare(TYPES[b.type].label) || String(b.submitted_at).localeCompare(String(a.submitted_at))}[F.sort] || null;
   return by ? list.slice().sort(by) : list;
 }
-const bkActive = () => !!(S.bk.month || S.bk.type || S.bk.area || S.bk.section || (S.bk.q || "").trim());
+const bkActive = () => !!(S.bk.month || S.bk.type || S.bk.area || S.bk.section || S.bk.entity || S.bk.bline || (S.bk.q || "").trim());
 function viewBooks(){
   const f = S.bkFilter, F = S.bk, base = bkSet(f), list = bkFiltered();
   const months = [...new Set(S.claims.map(claimMonth).filter(Boolean))].sort().reverse();
@@ -679,6 +726,8 @@ function viewBooks(){
         ${sel("type", "Claim type", Object.entries(TYPES).map(([k, t]) => [k, t.label]))}
         ${sel("section", "Section", sections().map(x => [x.key, x.label]))}
         ${sel("area", "Budget area", areas.map(a => [a, a]))}
+        ${sel("entity", "Charged to", [["RHC","RHC"],["GARC","GARC"]])}
+        ${sel("bline", "Budget line", budgetLines().filter(x => !F.entity || (F.entity === "RHC" ? x.rhc : x.garc)).map(x => [x.key, blName(x)]))}
         <label>Search<input id="bk-q" data-bk-k="q" type="search" value="${esc(F.q || "")}" placeholder="Name, ref, team, invoice no."></label>
         <label>Sort by<select data-bk-k="sort" id="bk-sort">${BK_SORTS.map(([v, l]) => `<option value="${v}" ${F.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
       </div>
@@ -691,11 +740,23 @@ function viewBooks(){
     const money = list.reduce((a, c) => a + num(c.total), 0), hrs = list.filter(c => c.type === "payroll").reduce((a, c) => a + num(c.hours), 0), vat = list.reduce((a, c) => a + num(c.vat_total), 0);
     const byType = Object.keys(TYPES).map(k => [k, list.filter(c => c.type === k)]).filter(([, l]) => l.length);
     h += `<div class="totals" style="justify-content:flex-start"><div style="align-items:flex-start"><small>${f === "ready" ? "To pay" : f === "processed" ? "Paid" : "Total"}${bkActive() ? " (filtered)" : ""}</small><strong>${gbp(money)}</strong></div><div style="align-items:flex-start"><small>Claims</small><strong>${list.length}${list.length !== base.length ? ` <span class="sub" style="font-size:.9rem">of ${base.length}</span>` : ""}</strong></div>${hrs ? `<div style="align-items:flex-start"><small>Payroll hours</small><strong>${fmtH(hrs)}</strong></div>` : ""}${vat ? `<div style="align-items:flex-start"><small>VAT included</small><strong>${gbp(vat)}</strong></div>` : ""}</div>
+    ${budgetTable(list)}
     ${byType.length > 1 ? `<div class="tablebox"><table><thead><tr><th>Claim type</th><th class="num">Claims</th><th class="num">Amount</th></tr></thead><tbody>${byType.map(([k, l]) => `<tr><td>${esc(TYPES[k].label)}</td><td class="num">${l.length}</td><td class="num">${gbp(l.reduce((a, c) => a + num(c.total), 0))}</td></tr>`).join("")}</tbody></table></div>` : ""}
     ${hrs ? `<p class="sub" style="margin:0">Payroll amounts are paid through wages.</p>` : ""}`;
   }
   if (!list.length) return h + `<div class="empty">${bkActive() ? "No claims match these filters." : f === "ready" ? "No approved claims are waiting. You'll get an email when one is ready." : "No claims here yet."}</div>`;
   return h + `<div class="claims">${list.map(c => claimCard(c, (isBookkeeper() && ["approved","processed"].includes(c.status) ? paymentBox(c) : "") + (c.status === "approved" ? `<div class="decide">${isBookkeeper() ? `<div class="row"><input id="payRef-${esc(c.id)}" placeholder="Payment reference (optional)" style="flex:1;min-width:180px"><button class="btn good" data-act="processed" data-id="${esc(c.id)}">Mark as paid</button></div>` : `<span class="sub">Only the bookkeeper can mark claims as paid.</span>`}</div>` : ""))).join("")}</div>`;
+}
+function budgetTable(list){
+  const F = S.bk, rows = new Map();
+  for (const c of list) for (const l of (c.lines || [])){ if (!l.charge_to) continue;
+    if (F.entity && l.charge_to !== F.entity) continue; if (F.bline && l.budget_line !== F.bline) continue;
+    const k = l.charge_to + "|" + l.budget_line, x = rows.get(k) || {ent: l.charge_to, name: (l.budget_code ? l.budget_code + " " : "") + (l.budget_label || ""), amt: 0, n: 0}; x.amt += num(l.amount); x.n++; rows.set(k, x); }
+  if (!rows.size) return "";
+  const list2 = [...rows.values()].sort((a, b) => a.ent.localeCompare(b.ent) || a.name.localeCompare(b.name, "en", {numeric: true}));
+  const tot = e => list2.filter(x => x.ent === e).reduce((t, x) => t + x.amt, 0);
+  return `<details class="panel" style="padding:12px 14px" ${F.entity || F.bline ? "open" : ""}><summary><strong>By budget line</strong> <span class="sub">RHC ${gbp(tot("RHC"))} · GARC ${gbp(tot("GARC"))}${list.some(c => c.status !== "processed" && c.status !== "approved") ? " · approved lines only" : ""}</span></summary>
+    <div class="tablebox" style="margin-top:8px"><table><thead><tr><th>Charged to</th><th>Budget line</th><th class="num">Lines</th><th class="num">Amount</th></tr></thead><tbody>${list2.map(x => `<tr><td>${esc(x.ent)}</td><td>${esc(x.name)}</td><td class="num">${x.n}</td><td class="num">${gbp(x.amt)}</td></tr>`).join("")}</tbody></table></div></details>`;
 }
 function payeeBank(c){ return c.type === "supplier" ? S.payees[c.id] : c.type === "payroll" ? null : S.banks[c.claimant]; }
 function paymentBox(c){
@@ -713,24 +774,24 @@ function paymentBox(c){
 function csvCell(v){ v = v == null ? "" : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
 async function exportCsv(all){
   const f = all ? "all" : S.bkFilter, list = all ? S.claims : bkFiltered();
-  const head = ["Ref","Status","Type","Claimant","Claimant email","Section","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Claimable miles","Line amount","Claim total","Attachments","Payee","Supplier VAT no","Due date","VAT invoice","Line net","Line VAT rate","Line VAT","Claim net","Claim VAT","Own rate"].concat(isBookkeeper() ? ["Pay to name","Sort code","Account number"] : []);
+  const head = ["Ref","Status","Type","Claimant","Claimant email","Section","Budget area","Team","Description","Invoice no","Invoice date","Pay period","Submitted","1st approver","1st approved on","2nd approver","2nd approved on","Paid on","Payment ref","Line date","Line detail","Activity","Hours","Rate","Miles","Claimable miles","Line amount","Claim total","Attachments","Payee","Supplier VAT no","Due date","VAT invoice","Line net","Line VAT rate","Line VAT","Claim net","Claim VAT","Own rate","Charged to","Budget code","Budget line"].concat(isBookkeeper() ? ["Pay to name","Sort code","Account number"] : []);
   const rows = [head];
   for (const c of list){
     const p = S.people[c.claimant] || {};
     for (const l of (c.lines || [])){
       const mix = isMixed(c.type), miles = c.type === "mileage" || (mix && lineItem(l) === "mileage");
-      const detail = mix ? mixedDetail(l) : c.type === "supplier" ? l.item : c.type === "mileage" ? `${l.from} to ${l.to}${l.ret ? " and return" : ""} – ${l.purpose}` : c.type === "expense" ? `${l.item}${l.supplier ? " (" + l.supplier + ")" : ""}` : l.session;
+      const detail = mix ? mixedDetail(l) : lineText(c, l);
       rows.push([c.ref, STATUS[c.status].label, TYPES[c.type].short, personName(c.claimant), p.email || "", c.section_label || "", c.budget_area, c.team, c.description, c.invoice_number, c.invoice_date || "", c.pay_period,
         isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), c.second_approver ? personName(c.second_approver) : "", isoDay(c.second_approved_at),
         isoDay(c.processed_at), c.payment_ref || "", l.date, detail, mix ? itemLabel(l) : (l.activity || ""), mix && lineItem(l) === "retainer" ? "" : (l.hours || ""), l.rate ?? (miles ? c.mileage_rate : "") ?? "",
         miles ? num(l.miles) * (l.ret ? 2 : 1) : "", miles ? (l.chargeable_miles ?? "") : "", l.amount || 0, c.total, (c.attachments || []).map(a => a.name).join("; "),
         c.type === "supplier" ? c.supplier_name : personName(c.claimant), c.supplier_vat_number || "", c.due_date || "", c.vat_invoice ? "Yes" : "No",
-        c.type === "supplier" ? (l.net ?? "") : "", c.vat_invoice ? (l.vat_rate ?? "") : "", c.vat_invoice ? (l.vat ?? "") : "", c.net_total ?? c.total, c.vat_total ?? 0, l.own_rate ? "Yes" : ""]
+        c.type === "supplier" ? (l.net ?? "") : "", c.vat_invoice ? (l.vat_rate ?? "") : "", c.vat_invoice ? (l.vat ?? "") : "", c.net_total ?? c.total, c.vat_total ?? 0, l.own_rate ? "Yes" : "", l.charge_to || "", l.budget_code || "", l.budget_label || ""]
         .concat(isBookkeeper() ? (b => b ? [b.account_name, fmtSort(b.sort_code), b.account_number] : [c.type === "payroll" ? "Payroll" : "", "", ""])(payeeBank(c)) : []));
     }
   }
   const blob = new Blob(["﻿" + rows.map(r => r.map(csvCell).join(",")).join("\r\n")], {type:"text/csv;charset=utf-8"});
-  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `rhc-claims-${all ? "all" : [f, S.bk.month, S.bk.type, S.bk.area].filter(Boolean).join("-")}-${today()}.csv`;
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `rhc-claims-${all ? "all" : [f, S.bk.month, S.bk.type, S.bk.area, S.bk.entity, S.bk.bline].filter(Boolean).join("-")}-${today()}.csv`;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
@@ -741,7 +802,7 @@ function viewPeople(){
     <div><strong>${esc(p.full_name || "(no name)")}</strong>${p.active ? "" : ` <span class="pill pending">New</span>`}<div class="sub">${esc(p.email)}</div><div class="sub">${esc(p.club_role)}</div></div>
     <div class="checks">
       <label><input type="checkbox" data-r="active" ${p.active ? "checked" : ""}> Active</label>
-      <label class="fin"><input type="checkbox" data-r="finance" ${p.is_finance ? "checked" : ""}> Finance approver (2nd approval)</label>
+      <label class="fin"><input type="checkbox" data-r="finance" ${p.is_finance ? "checked" : ""}> Finance approver (1st or 2nd approval)</label>
       <details class="actrates" ${(p.captain_sections || []).length ? "open" : ""}><summary>Section captain (1st approval)${(p.captain_sections || []).length ? `: ${esc((p.captain_sections || []).map(sectionLabel).filter(Boolean).join(", "))}` : ""}</summary>
         <div class="capgrid">${sections().map(x => `<label><input type="checkbox" data-r="cap" value="${esc(x.key)}" ${(p.captain_sections || []).includes(x.key) ? "checked" : ""}> ${esc(x.label)}</label>`).join("")}</div>
       </details>
@@ -768,9 +829,9 @@ function viewPeople(){
   </div>`;
   const noCap = sections().filter(x => !ppl.some(p => p.active && (p.captain_sections || []).includes(x.key))).map(x => x.label);
   const fin = ppl.filter(p => p.active && p.is_finance).length;
-  return `<div><h2>People</h2><p class="lede">Activate new accounts, choose each section's captains (1st approval) and the finance approvers (2nd approval), and set how each coach is paid. A section can have several captains; any one of them can approve. Each person is paid hours either at rates you set per timesheet heading, or at their own rates (they type them; approvers see these flagged). Add a retainer for coaches paid a fixed amount, either per month or once per season (a season retainer can only be claimed once). Everyone active can submit claims.</p></div>
-    ${fin < 2 ? `<div class="notice warn">${fin ? "Only one finance approver is set. Add a second (e.g. the Chairperson) so they can approve each other's claims." : "No finance approver is set yet, so no claim can get its 2nd approval."}</div>` : ""}
-    ${noCap.length ? `<div class="notice warn">No captain yet for: ${esc(noCap.join(", "))}. Until one is set, a finance approver gives the 1st approval for these sections.</div>` : ""}
+  return `<div><h2>People</h2><p class="lede">Activate new accounts, choose each section's captains (1st approval only) and the finance approvers (1st or 2nd approval), and set how each coach is paid. A section can have several captains; any one of them can approve. Each person is paid hours either at rates you set per timesheet heading, or at their own rates (they type them; approvers see these flagged). Add a retainer for coaches paid a fixed amount, either per month or once per season (a season retainer can only be claimed once). Everyone active can submit claims.</p></div>
+    ${fin < 2 ? `<div class="notice warn">${fin ? "Only one finance approver is set. Add a second (e.g. the Chairperson) for cover, and so a claim the finance approver submits can be approved if no captain approves it first." : "No finance approver is set yet, so no claim can get its 2nd approval."}</div>` : ""}
+    ${noCap.length ? `<div class="notice warn">No captain yet for: ${esc(noCap.join(", "))}. Until one is set, only a finance approver can give the 1st approval for these sections.</div>` : ""}
     <section class="panel" style="gap:0;padding-block:6px">${ppl.length ? ppl.map(row).join("") : `<p class="sub">Nobody has created an account yet.</p>`}</section>`;
 }
 const rateVal = v => { v = String(v || "").trim(); return v === "" ? null : num(v); };
@@ -799,11 +860,18 @@ function viewSettings(){
     <label>Budget areas <span class="hint">One per line</span><textarea id="sAreas" rows="7">${esc((S.settings.budget_areas || DEFAULT_AREAS).join("\n"))}</textarea></label>
   </div><div class="row end"><button class="btn primary" data-act="save-settings">Save settings</button></div></section>
   <section class="panel" id="secEditor">
-    <div><h3>Sections</h3><p class="sub" style="margin:4px 0 0">Every claim is for one section. That section's captains give the 1st approval; choose captains in People. A finance approver gives the 2nd approval for every section.</p></div>
+    <div><h3>Sections</h3><p class="sub" style="margin:4px 0 0">Every claim is for one section. That section's captains (or a finance approver) give the 1st approval; choose captains in People. A finance approver gives the 2nd approval for every section.</p></div>
     <div class="tablebox"><table class="lines"><thead><tr><th>Section</th><th>Captains</th><th></th></tr></thead><tbody>
     ${secDraft().map((x, i) => `<tr><td><input data-sec-i="${i}" value="${esc(x.label)}" aria-label="Section name"></td><td class="sub" style="padding-top:12px">${esc(Object.values(S.people).filter(p => p.active && (p.captain_sections || []).includes(x.key)).map(p => p.full_name).join(", ") || "None yet")}</td><td><button class="btn small danger" data-act="sec-del" data-i="${i}" aria-label="Remove section">✕</button></td></tr>`).join("")}
     </tbody></table></div>
     <div class="row" style="justify-content:space-between"><button class="btn small" data-act="sec-add">+ Add section</button><button class="btn primary" data-act="sec-save">Save sections</button></div>
+  </section>
+  <section class="panel" id="blEditor">
+    <div><h3>Budget lines</h3><p class="sub" style="margin:4px 0 0">At the 2nd approval, finance charges each line of a claim to RHC or GARC and to one of these budget lines. Tick which of the two each line can be used for.</p></div>
+    <div class="tablebox"><table class="lines"><thead><tr><th style="width:7em">Code</th><th>Budget line</th><th>RHC</th><th>GARC</th><th></th></tr></thead><tbody>
+    ${blDraft().map((x, i) => `<tr><td><input data-bl-i="${i}" data-bl-k="code" value="${esc(x.code || "")}" aria-label="Code" placeholder="none"></td><td><input data-bl-i="${i}" data-bl-k="label" value="${esc(x.label)}" aria-label="Budget line name"></td><td><input type="checkbox" data-bl-i="${i}" data-bl-k="rhc" ${x.rhc ? "checked" : ""} aria-label="Available to RHC"></td><td><input type="checkbox" data-bl-i="${i}" data-bl-k="garc" ${x.garc ? "checked" : ""} aria-label="Available to GARC"></td><td><button class="btn small danger" data-act="bl-del" data-i="${i}" aria-label="Remove budget line">✕</button></td></tr>`).join("")}
+    </tbody></table></div>
+    <div class="row" style="justify-content:space-between"><button class="btn small" data-act="bl-add">+ Add budget line</button><button class="btn primary" data-act="bl-save">Save budget lines</button></div>
   </section>
   <section class="panel" id="actEditor">
     <div><h3>Timesheet headings</h3><p class="sub" style="margin:4px 0 0">The headings coaches claim hours under, on payroll and invoice claims. Each person's rate for each heading is set in People.</p></div>
@@ -813,6 +881,7 @@ function viewSettings(){
     <div class="row" style="justify-content:space-between"><button class="btn small" data-act="act-add">+ Add heading</button><button class="btn primary" data-act="act-save">Save headings</button></div>
   </section>`;
 }
+function blDraft(){ if (!S.blDraft) S.blDraft = JSON.parse(JSON.stringify(budgetLines())); return S.blDraft; }
 function secDraft(){ if (!S.secDraft) S.secDraft = JSON.parse(JSON.stringify(sections())); return S.secDraft; }
 function actDraft(){ if (!S.actDraft) S.actDraft = JSON.parse(JSON.stringify(acts())); return S.actDraft; }
 
@@ -902,7 +971,7 @@ document.addEventListener("click", async e => {
     case "auth": S.authView = b.dataset.v; S.authMsg = ""; render(); break;
     case "signout": await S.sb.auth.signOut(); break;
     case "reload": await loadAll(false); render(); break;
-    case "tab": S.actDraft = null; S.secDraft = null; S.tab = b.dataset.tab; if (S.tab !== "new") S.lastSubmitted = null; S.editingDetails = false; render(); window.scrollTo(0,0); break;
+    case "tab": S.actDraft = null; S.secDraft = null; S.blDraft = null; S.tab = b.dataset.tab; if (S.tab !== "new") S.lastSubmitted = null; S.editingDetails = false; render(); window.scrollTo(0,0); break;
     case "type": { const k = S.draft; S.draft = blankDraft(b.dataset.type); if (k){ S.draft.section = k.section || S.draft.section; S.draft.budget_area = k.budget_area; S.draft.team = k.team; S.draft.description = k.description; } saveLocalDraft(); render(); break; }
     case "add-line": { const last = S.draft.lines[S.draft.lines.length - 1] || {}; const n = {date: last.date || today()}; if (last.activity) n.activity = last.activity; if (last.item) n.item = last.item; if (last.item === "activity") n.activity_key = last.activity_key || ""; S.draft.lines.push(n); render(); break; }
     case "del-line": S.draft.lines.splice(+b.dataset.i, 1); render(); break;
@@ -984,7 +1053,11 @@ document.addEventListener("click", async e => {
       const paths = (Array.isArray(data) ? data : []).map(a => a.path).filter(Boolean);
       if (paths.length) S.sb.storage.from("receipts").remove(paths);
       toast("Claim deleted"); await loadAll(false); render(); break; }
-    case "approve": { b.disabled = true; const c = claim(); rpc("approve_claim", {p_claim_id:id}, r => r === "approved" ? `Second approval given. ${c ? c.ref : "The claim"} is now with the bookkeeper` : `First approval given for ${c ? c.ref : "the claim"}`); break; }
+    case "approve": { const c = claim(); const args = {p_claim_id:id};
+      if (c && c.status === "first_approved"){ const a = allocFor(c), miss = a.findIndex(x => !x.entity || !x.line);
+        if (miss >= 0){ toast(`Line ${miss + 1}: choose RHC or GARC and a budget line`); break; }
+        args.p_allocations = a.map(x => ({entity: x.entity, line: x.line})); }
+      b.disabled = true; rpc("approve_claim", args, r => r === "approved" ? `Second approval given. ${c ? c.ref : "The claim"} is now with the bookkeeper` : `First approval given for ${c ? c.ref : "the claim"}`); break; }
     case "reject": S.decideOpen = id; render(); { const t = $("#rejNote-" + CSS.escape(id)); if (t) t.focus(); } break;
     case "reject-cancel": S.decideOpen = null; render(); break;
     case "reject-yes": { const t = $("#rejNote-" + CSS.escape(id)), note = t ? t.value.trim() : "";
@@ -992,7 +1065,7 @@ document.addEventListener("click", async e => {
       S.decideOpen = null; rpc("return_claim", {p_claim_id:id, p_reason:note}, "Claim returned to the claimant"); break; }
     case "processed": { b.disabled = true; const inp = $("#payRef-" + CSS.escape(id)); rpc("mark_processed", {p_claim_id:id, p_payment_ref: inp ? inp.value.trim() : ""}, "Marked as paid"); break; }
     case "bk": S.bkFilter = b.dataset.f; render(); break;
-    case "bk-clear": S.bk = {month:"", type:"", area:"", section:"", q:"", sort:S.bk.sort}; render(); break;
+    case "bk-clear": S.bk = {month:"", type:"", area:"", section:"", entity:"", bline:"", q:"", sort:S.bk.sort}; render(); break;
     case "export": exportCsv(false); break;
     case "export-all": exportCsv(true); break;
     case "save-person": savePerson(id); break;
@@ -1007,6 +1080,19 @@ document.addEventListener("click", async e => {
       const {error} = await S.sb.rpc("admin_update_sections", {p_list: list});
       if (error){ toast(errText(error)); break; }
       S.secDraft = null; toast("Sections saved"); await loadAll(false); render(); break;
+    }
+    case "bl-add": blDraft().push({key: "", code: "", label: "", rhc: true, garc: false}); render(); { const ins = document.querySelectorAll('[data-bl-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); } break;
+    case "bl-del": blDraft().splice(+b.dataset.i, 1); render(); break;
+    case "bl-save": {
+      const used = new Set(), list = [];
+      for (const x of blDraft()){ const label = String(x.label || "").trim(), code = String(x.code || "").trim(); if (!label){ toast("Every budget line needs a name"); return; }
+        if (!x.rhc && !x.garc){ toast(`Tick RHC, GARC or both for ${label}`); return; }
+        let key = x.key || (code || label).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 34) || "line";
+        while (used.has(key)) key = key.slice(0, 34) + "_" + Math.random().toString(36).slice(2, 5);
+        used.add(key); list.push({key, code, label, rhc: !!x.rhc, garc: !!x.garc}); }
+      const {error} = await S.sb.rpc("admin_update_budget_lines", {p_list: list});
+      if (error){ toast(errText(error)); break; }
+      S.blDraft = null; toast("Budget lines saved"); await loadAll(false); render(); break;
     }
     case "act-add": actDraft().push({key: "", label: "", group: "Programmes", rate: null}); render(); { const ins = document.querySelectorAll('[data-act-k="label"]'); if (ins.length) ins[ins.length - 1].focus(); } break;
     case "act-del": actDraft().splice(+b.dataset.i, 1); render(); break;
@@ -1038,8 +1124,10 @@ function onPayBy(e){
   return true;
 }
 function onField(e){
+  if (onAlloc(e)) return;
   if (onPayBy(e)) return;
   if (onBkField(e)) return;
+  if (e.target.dataset && e.target.dataset.blI != null){ const row = blDraft()[+e.target.dataset.blI]; if (row){ const k = e.target.dataset.blK; row[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value; } return; }
   if (e.target.dataset && e.target.dataset.secI != null){ const row = secDraft()[+e.target.dataset.secI]; if (row) row.label = e.target.value; return; }
   if (e.target.dataset && e.target.dataset.actI != null){ const row = actDraft()[+e.target.dataset.actI]; if (row) row[e.target.dataset.actK] = e.target.value; return; }
   const t = e.target, d = S.draft; if (!d || !t.closest("#claimForm")) return;
