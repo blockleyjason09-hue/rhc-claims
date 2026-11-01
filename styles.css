@@ -186,3 +186,26 @@ details.actrates summary{font-size:.9rem}
 .alloc td:nth-child(4) select{min-width:14em}
 .alloc .allrow td{background:var(--surface-2)}
 #blEditor input[type=checkbox]{width:auto;margin-top:12px}
+/* version 2: timesheets and expenses */
+.types.two{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.track.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.lines.ts select{min-width:170px;max-width:210px}
+.lines.ts input[type="date"]{min-width:130px}
+.lines.ts td input[data-k="session"]{min-width:140px}
+.lines.ts input.w-s{min-width:64px;width:72px}
+table.payroll{font-size:.9rem}
+table.payroll th{white-space:normal;vertical-align:bottom}
+table.payroll td{white-space:nowrap}
+table.payroll td:last-child{white-space:normal;min-width:150px}
+table.payroll tr.muted td{color:var(--muted)}
+table.payroll td.paycell{background:var(--ok-soft);font-weight:700}
+table.payroll tr.tot td{border-top:2px solid var(--line)}
+.monthgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}
+.monthcard{border:1px solid var(--line);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.monthcard .pill{font-size:.68rem;padding:1px 6px}
+table.payroll .tsrefs{white-space:normal;font-size:.75rem}
+.flagconfirm{display:flex;flex-direction:column;gap:10px;border-left:4px solid var(--warn);padding-left:12px}
+.lines.ts tr.flagged td{background:var(--warn-soft)}
+.lines.miles input{min-width:70px}
+.lines.miles input[type="date"]{min-width:130px}
+.lines.miles input.w-s{width:70px}
