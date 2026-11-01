@@ -1,0 +1,22 @@
+# Keeps the claims database awake on Supabase's free plan.
+# Twice a week it makes one small request to the database, so the project never
+# counts as inactive. If the request fails (for example the project is already
+# paused), the run goes red and GitHub emails you.
+name: Keep Supabase awake
+
+on:
+  schedule:
+    - cron: "17 6 * * 1,4"   # Mondays and Thursdays, about 6am UK time
+  workflow_dispatch:          # lets you run it by hand from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask the database for the settings row
+        run: |
+          curl --fail --silent --show-error --max-time 30 \
+            "https://pissizeruvxqobeiknom.supabase.co/rest/v1/settings?select=id&limit=1" \
+            -H "apikey: sb_publishable_HRRSXZtlCz71A0oeFZMGdQ_we8jRtCl" \
+            -o /dev/null -w "Supabase answered with status %{http_code}\n"
