@@ -22,7 +22,7 @@ const ACT_GROUPS = ["Junior coaching","Senior coaching","Programmes","Umpiring",
 
 const S = {sb:null,user:null,me:null,settings:{},claims:[],people:{},names:{},banks:{},myBank:null,viewAsCoach:false,
   tab:null,draft:null,authView:"signin",authMsg:"",recovery:false,lastSubmitted:null,decideOpen:null,confirmDelete:null,alloc:{},
-  exFilter:"ready",ex:{month:"",entity:"",q:""},payMonth:"",confirmRun:false,editingDetails:false,channel:null,loaded:false};
+  exFilter:"ready",ex:{month:"",entity:"",area:"",q:""},payMonth:"",confirmRun:false,editingDetails:false,channel:null,loaded:false};
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -47,6 +47,11 @@ const monthShort = m => m ? new Date(m + "-15T12:00:00Z").toLocaleDateString("en
 const lastDay = m => new Date(Date.UTC(+m.slice(0,4), +m.slice(5,7), 0)).getUTCDate();
 const dueDay = () => Math.min(28, Math.max(1, Math.round(num(S.settings.timesheet_due_day) || 10)));
 const dueDate = m => `${addMonth(m, 1)}-${String(dueDay()).padStart(2, "0")}`;
+/* Coaches are told an earlier deadline (the 7th); the cut-off for that month's payroll stays later (the 10th). */
+const askDay = () => Math.min(dueDay(), Math.max(1, Math.round(num(S.settings.coach_deadline_day) || 7)));
+const askDate = m => `${addMonth(m, 1)}-${String(askDay()).padStart(2, "0")}`;
+const ordinal = n => n + (n % 10 === 1 && n % 100 !== 11 ? "st" : n % 10 === 2 && n % 100 !== 12 ? "nd" : n % 10 === 3 && n % 100 !== 13 ? "rd" : "th");
+const reminderDays = () => (Array.isArray(S.settings.reminder_days) && S.settings.reminder_days.length ? S.settings.reminder_days : [1, 5]).map(Number).sort((a, b) => a - b);
 const holPct = () => S.settings.holiday_pay_pct == null ? 12.07 : num(S.settings.holiday_pay_pct);
 const payCode = () => S.settings.payroll_code || "80501";
 /* A timesheet for month M is due by the due day of the next month. If it arrives later,
@@ -57,9 +62,29 @@ const thisMonth = () => today().slice(0, 7);
 const mileRate = () => S.settings.mileage_rate == null ? 0.30 : num(S.settings.mileage_rate);
 const freeMiles = () => S.settings.mileage_free_miles == null ? 50 : num(S.settings.mileage_free_miles);
 const isMile = l => l && l.kind === "mileage";
-function mileCalc(l){ const m = num(l.miles) * (l.ret ? 2 : 1), ch = Math.max(0, m - freeMiles()); return {m, ch, amt: r2(ch * mileRate())}; }
-const mileText = l => `Mileage: ${l.from || ""} to ${l.to || ""}${l.ret ? " and back" : ""}${l.purpose ? " – " + l.purpose : ""}`;
-const exLineText = l => isMile(l) ? `${mileText(l)} (${num(l.claimable_miles)} of ${num(l.total_miles)} mi at ${Math.round(num(l.rate) * 100)}p)` : l.item;
+/* The club's mileage policy: the reason for a journey decides how it's paid. */
+const BASIS = {coaching:"Coaching away from RHC", first_xi:"1st XI away match", chair:"Agreed in advance with the Chair", contract:"Under my contract"};
+const minPlayers = () => S.settings.first_xi_min_players == null ? 3 : num(S.settings.first_xi_min_players);
+const pence = v => `${r2(num(v) * 100)}p`;
+function myBases(){ const m = S.me || {}; return m.contract_mileage ? ["contract","chair"] : [...(m.is_first_xi ? ["first_xi"] : []), "coaching", "chair"]; }
+function basisRule(b){
+  const m = S.me || {};
+  if (b === "first_xi") return `Away matches only, with at least ${minPlayers()} players in the car. ${pence(mileRate())} a mile for the shorter of the round trip from the Club or from where you set off.`;
+  if (b === "chair") return `Any other journey, only if the Chair agreed it before you drove. ${pence(mileRate())} for every mile.`;
+  if (b === "contract") return `As set out in your contract: ${pence(m.contract_mileage_rate)} a mile${num(m.contract_free_miles) ? `; the first ${num(m.contract_free_miles)} miles of each journey aren't claimable` : ""}.`;
+  return `Coaching you did away from Reading Hockey Club. ${pence(mileRate())} a mile; the first ${freeMiles()} miles of each journey aren't claimable (a return trip counts as one journey).`;
+}
+function mileCalc(l){
+  const b = l.basis || "coaching", me = S.me || {};
+  if (b === "first_xi"){ const a = num(l.rt_club), o = num(l.rt_origin), m = a && o ? Math.min(a, o) : (a || o); return {m, ch: m, rate: mileRate(), amt: r2(m * mileRate())}; }
+  const m = num(l.miles) * (l.ret ? 2 : 1);
+  if (b === "chair") return {m, ch: m, rate: mileRate(), amt: r2(m * mileRate())};
+  if (b === "contract"){ const r = num(me.contract_mileage_rate), ch = Math.max(0, m - num(me.contract_free_miles)); return {m, ch, rate: r, amt: r2(ch * r)}; }
+  const ch = Math.max(0, m - freeMiles()); return {m, ch, rate: mileRate(), amt: r2(ch * mileRate())};
+}
+const mileText = l => l.basis === "first_xi" ? `Mileage, 1st XI away match: ${l.purpose || ""} (${num(l.players)} players; round trip ${num(l.rt_club)} mi from Club, ${num(l.rt_origin)} mi from start)`
+  : `Mileage, ${({coaching:"coaching away from RHC", chair:"agreed in advance with the Chair", contract:"under contract"})[l.basis || "coaching"] || ""}: ${l.from || ""} to ${l.to || ""}${l.ret ? " and back" : ""}${l.purpose ? " – " + l.purpose : ""}${l.basis === "chair" && l.chair_date ? ` (agreed ${fmtDate(l.chair_date)})` : ""}`;
+const exLineText = l => isMile(l) ? `${mileText(l)}: ${num(l.claimable_miles)} mi at ${pence(l.rate)}` : l.item;
 const needsReceipt = d => d.lines.some(l => !isMile(l));
 const maxDay = () => S.settings.max_daily_hours == null ? 5 : num(S.settings.max_daily_hours);
 /* Possible double claims: the same heading on the same day as another session, or more than the
@@ -122,7 +147,12 @@ const actGroups = () => ACT_GROUPS.concat([...new Set(acts().map(a => a.group))]
 const budgetLines = () => Array.isArray(S.settings.budget_lines) ? S.settings.budget_lines : [];
 const blName = x => x ? (x.code ? x.code + " " : "") + x.label : "";
 const blByKey = k => budgetLines().find(x => x.key === k);
-const chargeText = l => l && l.budget_label ? `${l.charge_to} · ${(l.budget_code ? l.budget_code + " " : "") + l.budget_label}` : "";
+/* The budget's areas: four under RHC, plus GARC. */
+const AREAS = [["hockey","Hockey","RHC"],["camps","Camps","RHC"],["ta","Talent Academy","RHC"],["schools","School Partnerships","RHC"],["garc","GARC","GARC"]];
+const areaEnt = k => (AREAS.find(a => a[0] === k) || [])[2] || "";
+const areaName = k => { const a = AREAS.find(x => x[0] === k); return !a ? "" : a[2] === "GARC" ? "GARC" : "RHC – " + a[1]; };
+const lineAreas = x => Array.isArray(x.areas) && x.areas.length ? x.areas : [...(x.rhc ? ["hockey"] : []), ...(x.garc ? ["garc"] : [])];
+const chargeText = l => l && l.budget_label ? `${l.area ? areaName(l.area) : l.charge_to} · ${(l.budget_code ? l.budget_code + " " : "") + l.budget_label}` : "";
 const ENTITY = {RHC: "Reading Hockey Club (RHC)", GARC: "GARC"};
 
 /* ---------- files: download, libraries ---------- */
@@ -356,8 +386,9 @@ function monthOptions(cur){
 }
 function timesheetNote(d){
   const pm = payrollMonthFor(d.work_month, today()), late = pm !== d.work_month;
-  return late ? `<div class="notice warn" id="tsNote"><strong>This is a late timesheet.</strong> ${esc(monthName(d.work_month))} timesheets were due by ${fmtDate(dueDate(d.work_month))}, so these sessions will go into the <strong>${esc(monthName(pm))}</strong> payroll.</div>`
-    : `<div class="notice" id="tsNote">Payroll covers the 1st to the last day of each month. Your ${esc(monthName(d.work_month))} sessions are due by <strong>${fmtDate(dueDate(d.work_month))}</strong> and go into the ${esc(monthName(d.work_month))} payroll. You can send sessions one at a time or several together; they're all added up into one payroll record.</div>`;
+  if (late) return `<div class="notice warn" id="tsNote"><strong>This is a late timesheet.</strong> ${esc(monthName(d.work_month))} timesheets were due by ${fmtDate(askDate(d.work_month))} (final cut-off ${fmtDate(dueDate(d.work_month))}), so these sessions will go into the <strong>${esc(monthName(pm))}</strong> payroll.</div>`;
+  if (today() > askDate(d.work_month)) return `<div class="notice warn" id="tsNote"><strong>Past the deadline.</strong> ${esc(monthName(d.work_month))} timesheets were due by ${fmtDate(askDate(d.work_month))}. Submit straight away: until ${fmtDate(dueDate(d.work_month))} they can still go into the ${esc(monthName(d.work_month))} payroll.</div>`;
+  return `<div class="notice" id="tsNote">Payroll covers the 1st to the last day of each month. Your ${esc(monthName(d.work_month))} sessions are due by <strong>${fmtDate(askDate(d.work_month))}</strong> and go into the ${esc(monthName(d.work_month))} payroll. You can send sessions one at a time or several together; they're all added up into one payroll record. You'll get reminder emails on the ${reminderDays().map(ordinal).join(" and ")} of each month.</div>`;
 }
 function timesheetForm(d){
   const m = d.work_month, min = m + "-01", end = m + "-" + String(lastDay(m)).padStart(2, "0"), max = end < today() ? end : today();
@@ -417,17 +448,8 @@ function expenseForm(d){
     </div>
     <div>
       <h3 style="margin-bottom:4px">Mileage</h3>
-      <p class="sub" style="margin:0 0 8px">Driving your own car on club business. Claimed at ${Math.round(mileRate() * 100)}p a mile; the first ${freeMiles()} miles of each journey aren't claimable (a return trip counts as one journey). No receipt needed.</p>
-      ${d.lines.some(isMile) ? `<div class="tablebox"><table class="lines miles"><thead><tr><th>Date</th><th>From</th><th>To</th><th>Purpose</th><th class="num">Miles one way</th><th>Return</th><th class="num">Claimable</th><th class="num">Amount</th><th></th></tr></thead>
-      <tbody>${d.lines.map((l, i) => !isMile(l) ? "" : `<tr>
-        <td><input id="ln-${i}-date" type="date" data-line="${i}" data-k="date" value="${esc(l.date)}" aria-label="Date"></td>
-        <td><input id="ln-${i}-from" data-line="${i}" data-k="from" value="${esc(l.from)}" aria-label="From" placeholder="e.g. Reading"></td>
-        <td><input id="ln-${i}-to" data-line="${i}" data-k="to" value="${esc(l.to)}" aria-label="To" placeholder="e.g. Swindon"></td>
-        <td><input id="ln-${i}-purpose" data-line="${i}" data-k="purpose" value="${esc(l.purpose)}" aria-label="Purpose" placeholder="e.g. U14 away match"></td>
-        <td><input id="ln-${i}-miles" class="w-s" type="number" step="1" min="0" inputmode="decimal" data-line="${i}" data-k="miles" value="${esc(l.miles)}" aria-label="Miles one way"></td>
-        <td style="text-align:center;padding-top:12px"><input type="checkbox" id="ln-${i}-ret" data-line="${i}" data-k="ret" ${l.ret ? "checked" : ""} aria-label="Return journey"></td>
-        <td class="num calc" id="ln-${i}-ch">–</td><td class="num calc" id="ln-${i}-amt">–</td>
-        <td><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove journey" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></td></tr>`).join("")}</tbody></table></div>` : ""}
+      <p class="sub" style="margin:0 0 8px">Driving your own car for the club. No receipt needed. Choose the reason for each journey: it decides how the miles are paid.</p>
+      ${d.lines.map((l, i) => isMile(l) ? journeyCard(l, i, d) : "").join("")}
       <div class="row" style="margin-top:10px"><button class="btn small" data-act="add-mileage">+ Add journey</button></div>
     </div>
     <div class="totals" id="totals"></div>
@@ -442,6 +464,28 @@ function expenseForm(d){
     <div class="notice bad" id="formErr" hidden></div>
     <div class="row end"><span class="sub" id="uploadHint" ${d.attachments.length || !needsReceipt(d) ? "hidden" : ""}>Upload the receipt or invoice to submit.</span>${d.editingId ? `<button class="btn" data-act="cancel-edit">Cancel</button>` : `<button class="btn" data-act="reset">Clear form</button>`}<button class="btn primary" data-act="submit" id="submitBtn" ${d.attachments.length || !needsReceipt(d) ? "" : "disabled"}>${d.editingId ? "Resubmit claim" : "Submit claim"}</button></div>
   </section>`;
+}
+function journeyCard(l, i, d){
+  const b = l.basis || "coaching", opts = myBases().includes(b) ? myBases() : myBases().concat([b]), n = d.lines.slice(0, i + 1).filter(isMile).length;
+  const f = (k, label, attrs, hint) => `<label>${label}${hint ? ` <span class="hint">${hint}</span>` : ""}<input id="ln-${i}-${k}" data-line="${i}" data-k="${k}" value="${esc(l[k] == null ? "" : l[k])}" ${attrs || ""}></label>`;
+  const num_ = 'type="number" step="1" min="0" inputmode="decimal"';
+  return `<div class="journey">
+    <div class="row" style="justify-content:space-between"><strong>Journey ${n}</strong><span class="row" style="gap:12px"><span class="sub" id="ln-${i}-ch"></span><strong id="ln-${i}-amt">–</strong><button class="btn small danger" data-act="del-line" data-i="${i}" aria-label="Remove journey ${n}" ${d.lines.length < 2 ? "disabled" : ""}>✕</button></span></div>
+    <label>Reason for the journey<select id="ln-${i}-basis" data-line="${i}" data-k="basis">${opts.map(k => `<option value="${k}" ${k === b ? "selected" : ""}>${esc(BASIS[k])}</option>`).join("")}</select></label>
+    <p class="sub" style="margin:0">${esc(basisRule(b))}</p>
+    <div class="jgrid">
+      ${f("date", "Date", `type="date" max="${today()}"`)}
+      ${b === "first_xi" ? `${f("purpose", "Away match", 'placeholder="e.g. Women\'s 1s v Bath"')}
+        ${f("players", "Players in the car", `${num_} max="9"`, "including you")}
+        ${f("rt_club", "Round trip from the Club", num_, "miles")}
+        ${f("rt_origin", "Round trip from where you set off", num_, "miles")}`
+      : `${f("from", "From", 'placeholder="e.g. Reading"')}${f("to", "To", 'placeholder="e.g. Swindon"')}
+        ${f("purpose", b === "coaching" ? "Coaching session" : "Purpose", 'placeholder="e.g. County U14 trials"')}
+        ${f("miles", "Miles one way", num_)}
+        <label class="chk"><input type="checkbox" id="ln-${i}-ret" data-line="${i}" data-k="ret" ${l.ret ? "checked" : ""}> Return journey</label>`}
+    </div>
+    ${b === "chair" ? `<div class="jgrid"><label class="chk"><input type="checkbox" id="ln-${i}-chair_ok" data-line="${i}" data-k="chair_ok" ${l.chair_ok ? "checked" : ""}> The Chair agreed this before I drove</label>${f("chair_date", "Date the Chair agreed it", `type="date" max="${today()}"`)}</div>` : ""}
+  </div>`;
 }
 function filesHtml(list, editable){
   if (!list || !list.length) return editable ? `<span class="sub">No files uploaded yet.</span>` : "";
@@ -469,7 +513,7 @@ function recalc(){
     return;
   }
   let tot = 0, items = 0, miles = 0, ch = 0;
-  d.lines.forEach((l, i) => { if (isMile(l)){ const x = mileCalc(l); tot += x.amt; miles += x.amt; ch += x.ch; const a = $(`#ln-${i}-amt`); if (a) a.textContent = gbp(x.amt); const c = $(`#ln-${i}-ch`); if (c) c.textContent = `${x.ch} of ${x.m} mi`; } else { tot += num(l.amount); items += num(l.amount); } });
+  d.lines.forEach((l, i) => { if (isMile(l)){ const x = mileCalc(l); tot += x.amt; miles += x.amt; ch += x.ch; const a = $(`#ln-${i}-amt`); if (a) a.textContent = gbp(x.amt); const c = $(`#ln-${i}-ch`); if (c) c.textContent = l.basis === "first_xi" ? (x.m ? `${x.m} mi round trip` : "") : x.m ? `${x.ch} of ${x.m} mi claimable` : ""; } else { tot += num(l.amount); items += num(l.amount); } });
   el.innerHTML = (d.lines.some(isMile) ? `${d.lines.some(l => !isMile(l)) ? `<div><small>Items</small><strong>${gbp(items)}</strong></div>` : ""}<div><small>Mileage (${ch} mi)</small><strong>${gbp(miles)}</strong></div>` : "") + `<div><small>Total claimed</small><strong>${gbp(tot)}</strong></div>`;
 }
 function validate(d){
@@ -492,10 +536,14 @@ function validate(d){
     if (!d.description.trim()) errs.push("Say what the claim is for.");
     let ni = 0, nj = 0;
     d.lines.forEach(l => { if (!blank(l.date) && l.date > today()) errs.push(`${isMile(l) ? "Journey" : "Item"} dates can't be in the future.`); });
-    d.lines.forEach(l => { if (isMile(l)){ const n = `Journey ${++nj}`; if (blank(l.date)) errs.push(`${n}: add the date.`); if (blank(l.from) || blank(l.to)) errs.push(`${n}: add where you drove from and to.`); if (blank(l.purpose)) errs.push(`${n}: add the purpose.`); if (num(l.miles) <= 0) errs.push(`${n}: add the miles.`); }
+    d.lines.forEach(l => { if (isMile(l)){ const n = `Journey ${++nj}`, b = l.basis || "coaching"; if (blank(l.date)) errs.push(`${n}: add the date.`);
+        if (!myBases().includes(b)) errs.push(`${n}: choose a reason for the journey.`);
+        if (b === "first_xi"){ if (blank(l.purpose)) errs.push(`${n}: say which away match.`); if (num(l.players) < minPlayers()) errs.push(`${n}: 1st XI mileage needs at least ${minPlayers()} players in the car.`); if (num(l.rt_club) <= 0 || num(l.rt_origin) <= 0) errs.push(`${n}: add both round-trip distances.`); }
+        else { if (blank(l.from) || blank(l.to)) errs.push(`${n}: add where you drove from and to.`); if (blank(l.purpose)) errs.push(`${n}: add the purpose.`); if (num(l.miles) <= 0) errs.push(`${n}: add the miles.`); }
+        if (b === "chair"){ if (!l.chair_ok) errs.push(`${n}: tick to confirm the Chair agreed it in advance.`); if (blank(l.chair_date) || (!blank(l.date) && l.chair_date > l.date)) errs.push(`${n}: add the date the Chair agreed it, on or before the journey.`); } }
       else { const n = `Item ${++ni}`; if (blank(l.date)) errs.push(`${n}: add the date.`); if (blank(l.item)) errs.push(`${n}: say what was bought.`); if (num(l.amount) <= 0) errs.push(`${n}: add the amount.`); } });
     if (needsReceipt(d) && !d.attachments.length) errs.push("Upload the receipt or invoice.");
-    if (d.lines.length && d.lines.every(isMile) && d.lines.every(l => mileCalc(l).ch <= 0)) errs.push(`None of these journeys is over ${freeMiles()} miles, so there's nothing to claim.`);
+    if (d.lines.length && d.lines.every(isMile) && d.lines.every(l => mileCalc(l).ch <= 0)) errs.push("None of these journeys has any claimable miles, so there's nothing to claim.");
   }
   if (!d.declare) errs.push("Tick the confirmation box.");
   return errs;
@@ -512,7 +560,7 @@ async function submitDraft(){
       lines:d.lines.map(l => { const o = {date:l.date, activity_key:l.activity_key, session:String(l.session || "").trim(), hours:num(l.hours)}; if (ownRates()) o.rate = num(l.rate); return o; })};
   } else {
     p = {type:"expense", entity:d.entity, description:d.description.trim(), team:String(d.team || "").trim(),
-      lines:d.lines.map(l => isMile(l) ? {kind:"mileage", date:l.date, from:String(l.from || "").trim(), to:String(l.to || "").trim(), purpose:String(l.purpose || "").trim(), miles:num(l.miles), ret:!!l.ret}
+      lines:d.lines.map(l => isMile(l) ? mileagePayload(l)
         : {kind:"item", date:l.date, item:String(l.item || "").trim(), supplier:String(l.supplier || "").trim(), amount:num(l.amount)}), attachments:d.attachments};
   }
   const {data, error} = await S.sb.rpc("submit_claim", {p, p_claim_id: d.editingId || null});
@@ -521,6 +569,13 @@ async function submitDraft(){
   await loadClaims();
   S.lastSubmitted = S.claims.find(c => c.id === data) || {id:data, ref:"your claim", type:d.type, total:0, hours:0};
   render(); window.scrollTo(0, 0);
+}
+function mileagePayload(l){
+  const b = l.basis || "coaching", o = {kind:"mileage", basis:b, date:l.date, purpose:String(l.purpose || "").trim()};
+  if (b === "first_xi") return Object.assign(o, {players:num(l.players), rt_club:num(l.rt_club), rt_origin:num(l.rt_origin)});
+  Object.assign(o, {from:String(l.from || "").trim(), to:String(l.to || "").trim(), miles:num(l.miles), ret:!!l.ret});
+  if (b === "chair") Object.assign(o, {chair_ok:!!l.chair_ok, chair_date:l.chair_date || ""});
+  return o;
 }
 function submittedView(){
   const c = S.lastSubmitted, ts = c.type === "timesheet";
@@ -560,9 +615,8 @@ function claimDetail(c, open){
     const items = (c.lines || []).filter(l => !isMile(l)), jn = (c.lines || []).filter(isMile);
     body = (items.length ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Item</th><th>Supplier</th><th class="num">Amount</th>${coded ? "<th>Charged to</th>" : ""}</tr></thead>
       <tbody>${items.map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(l.item)}</td><td>${esc(l.supplier)}</td><td class="num">${gbp(l.amount)}</td>${coded ? `<td>${esc(chargeText(l))}</td>` : ""}</tr>`).join("")}</tbody></table></div>` : "")
-      + (jn.length ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Journey</th><th>Purpose</th><th class="num">Miles</th><th class="num">Claimable</th><th class="num">Amount</th>${coded ? "<th>Charged to</th>" : ""}</tr></thead>
-      <tbody>${jn.map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(l.from)} to ${esc(l.to)}${l.ret ? " and back" : ""}</td><td>${esc(l.purpose)}</td><td class="num">${esc(l.total_miles)}</td><td class="num">${esc(l.claimable_miles)} @ ${Math.round(num(l.rate) * 100)}p</td><td class="num">${gbp(l.amount)}</td>${coded ? `<td>${esc(chargeText(l))}</td>` : ""}</tr>`).join("")}</tbody></table></div>` : "")
-      + (jn.length ? `<p class="sub" style="margin:0">Mileage: first ${esc(c.free_miles ?? freeMiles())} miles of each journey not claimable.</p>` : "") + `
+      + (jn.length ? `<div class="tablebox"><table><thead><tr><th>Date</th><th>Reason</th><th>Journey</th><th class="num">Miles</th><th class="num">Claimable</th><th class="num">Amount</th>${coded ? "<th>Charged to</th>" : ""}</tr></thead>
+      <tbody>${jn.map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(BASIS[l.basis || "coaching"])}${l.basis === "chair" && l.chair_date ? `<div class="sub">agreed ${fmtDate(l.chair_date)}</div>` : ""}</td><td>${l.basis === "first_xi" ? `${esc(l.purpose)}<div class="sub">${esc(num(l.players))} players · round trip ${esc(num(l.rt_club))} mi from Club, ${esc(num(l.rt_origin))} mi from start</div>` : `${esc(l.from)} to ${esc(l.to)}${l.ret ? " and back" : ""}<div class="sub">${esc(l.purpose)}</div>`}</td><td class="num">${esc(l.total_miles)}</td><td class="num">${esc(l.claimable_miles)} @ ${pence(l.rate)}</td><td class="num">${gbp(l.amount)}</td>${coded ? `<td>${esc(chargeText(l))}</td>` : ""}</tr>`).join("")}</tbody></table></div>` : "") + `
       ${c.attachments && c.attachments.length ? `<div class="files">${filesHtml(c.attachments, false)}</div>` : ""}`;
   }
   return `<details ${open ? "open" : ""}><summary>${c.type === "timesheet" ? "Sessions" : "Claim details"}</summary><div style="display:flex;flex-direction:column;gap:10px">${c.description ? `<p style="margin:0">${esc(c.description)}</p>` : ""}${body}</div></details>`;
@@ -603,7 +657,7 @@ function monthSummary(mine){
     const ok = list.filter(c => ["approved","processed"].includes(c.status)), wait = list.filter(c => c.status === "pending"), back = list.filter(c => c.status === "returned");
     const sum = (l, k) => r2(l.reduce((t, c) => t + num(c[k]), 0));
     const paid = list.length && list.every(c => c.status === "processed");
-    return `<div class="monthcard"><div class="row" style="justify-content:space-between"><strong>${esc(monthName(m))}</strong><span class="sub">${paid ? "Processed" : `Due by ${fmtDate(dueDate(m))}`}</span></div>
+    return `<div class="monthcard"><div class="row" style="justify-content:space-between"><strong>${esc(monthName(m))}</strong><span class="sub">${paid ? "Processed" : `Due by ${fmtDate(askDate(m))}`}</span></div>
       <div class="sub">${list.length} timesheet${list.length > 1 ? "s" : ""}: ${list.map(c => `${esc(c.ref)} <span class="pill ${st(c).cls}">${esc(c.status === "processed" ? "processed" : c.status === "approved" ? "approved" : c.status === "pending" ? "waiting" : "returned")}</span>`).join(" ")}</div>
       <div class="row" style="gap:4px 18px"><span><strong>${fmtH(sum(ok, "hours"))}</strong> · <strong>${gbp(sum(ok, "total"))}</strong> approved${paid ? " and processed" : " for payroll"}</span>${wait.length ? `<span class="sub">+ ${fmtH(sum(wait, "hours"))} (${gbp(sum(wait, "total"))}) waiting for approval</span>` : ""}${back.length ? `<span class="sub">${back.length} returned to fix</span>` : ""}</div>
       ${list.some(c => c.late) ? `<div class="sub">Late timesheets go into the following payroll.</div>` : ""}</div>`;
@@ -635,32 +689,34 @@ function decideBox(c){
 }
 function allocFor(c){
   const n = (c.lines || []).length;
-  if (!S.alloc[c.id] || S.alloc[c.id].length !== n) S.alloc[c.id] = (c.lines || []).map(l => ({entity: l.charge_to || c.entity || "", line: l.budget_line || ""}));
+  if (!S.alloc[c.id] || S.alloc[c.id].length !== n) S.alloc[c.id] = (c.lines || []).map(l => ({area: l.area || (c.entity === "GARC" ? "garc" : ""), line: l.budget_line || ""}));
   return S.alloc[c.id];
 }
-function allocOpts(ent, cur){
-  const list = budgetLines().filter(x => !ent || (ent === "RHC" ? x.rhc : x.garc));
-  return `<option value="">Choose budget line…</option>` + list.map(x => `<option value="${esc(x.key)}" ${x.key === cur ? "selected" : ""}>${esc(blName(x))}</option>`).join("");
+function allocOpts(area, cur){
+  const opt = x => `<option value="${esc(x.key)}" ${x.key === cur ? "selected" : ""}>${esc(blName(x))}</option>`;
+  if (!area) return `<option value="">Choose budget line…</option>` + budgetLines().map(opt).join("");
+  const ent = areaEnt(area), mine = budgetLines().filter(x => lineAreas(x).includes(area)), other = budgetLines().filter(x => !lineAreas(x).includes(area) && lineAreas(x).some(a => areaEnt(a) === ent));
+  return `<option value="">Choose budget line…</option><optgroup label="In the ${esc(areaName(area))} budget">${mine.map(opt).join("")}</optgroup>${other.length ? `<optgroup label="Other ${ent} lines">${other.map(opt).join("")}</optgroup>` : ""}`;
 }
-const entOpts = cur => ["RHC","GARC"].map(v => `<option ${v === cur ? "selected" : ""}>${v}</option>`).join("");
+const areaOpts = cur => `<option value="">Choose area…</option>` + AREAS.map(([k]) => `<option value="${k}" ${k === cur ? "selected" : ""}>${esc(areaName(k))}</option>`).join("");
 function allocBox(c){
-  const a = allocFor(c), lines = c.lines || [], id = esc(c.id), left = a.filter(x => !x.entity || !x.line).length;
-  const all = lines.length > 1 ? `<tr class="allrow"><td colspan="2"><strong>All items</strong> <span class="sub">sets every item at once</span></td><td></td><td><select data-alloc="${id}" data-ai="all" data-ak="line" aria-label="Budget line for all items">${allocOpts(a[0].entity, "")}</select></td></tr>` : "";
-  return `<div class="alloc"><div><strong>Budget line</strong><p class="sub" style="margin:2px 0 0">${esc(personName(c.claimant))} chose <strong>${esc(c.entity)}</strong>. Choose the budget line for each item. Change RHC/GARC only if it's wrong.</p></div>
-    <div class="tablebox"><table><thead><tr><th>Item</th><th class="num">Amount</th><th>Charge to</th><th>Budget line</th></tr></thead><tbody>${all}
+  const a = allocFor(c), lines = c.lines || [], id = esc(c.id), left = a.filter(x => !x.area || !x.line).length;
+  const all = lines.length > 1 ? `<tr class="allrow"><td colspan="2"><strong>All items</strong> <span class="sub">sets every item at once</span></td><td><select data-alloc="${id}" data-ai="all" data-ak="area" aria-label="Area for all items">${areaOpts("")}</select></td><td><select data-alloc="${id}" data-ai="all" data-ak="line" aria-label="Budget line for all items">${allocOpts(a.every(x => x.area === a[0].area) ? a[0].area : "", "")}</select></td></tr>` : "";
+  return `<div class="alloc"><div><strong>Area and budget line</strong><p class="sub" style="margin:2px 0 0">${esc(personName(c.claimant))} chose <strong>${esc(c.entity)}</strong>. Choose the budget area (Hockey, Camps, Talent Academy, School Partnerships or GARC) and the budget line for each item. Lines in that area's budget are listed first.</p></div>
+    <div class="tablebox"><table><thead><tr><th>Item</th><th class="num">Amount</th><th>Area</th><th>Budget line</th></tr></thead><tbody>${all}
     ${lines.map((l, i) => `<tr><td>${esc(isMile(l) ? exLineText(l) : l.item)}${!isMile(l) && l.supplier ? ` <span class="sub">(${esc(l.supplier)})</span>` : ""}</td><td class="num">${gbp(l.amount)}</td>
-      <td><select data-alloc="${id}" data-ai="${i}" data-ak="entity" aria-label="Item ${i + 1}: charge to">${entOpts(a[i].entity)}</select></td>
-      <td><select data-alloc="${id}" data-ai="${i}" data-ak="line" aria-label="Item ${i + 1}: budget line">${allocOpts(a[i].entity, a[i].line)}</select></td></tr>`).join("")}
+      <td><select data-alloc="${id}" data-ai="${i}" data-ak="area" aria-label="Item ${i + 1}: area">${areaOpts(a[i].area)}</select></td>
+      <td><select data-alloc="${id}" data-ai="${i}" data-ak="line" aria-label="Item ${i + 1}: budget line">${allocOpts(a[i].area, a[i].line)}</select></td></tr>`).join("")}
     </tbody></table></div>
-    <span class="sub">${left ? `${left} item${left > 1 ? "s" : ""} still need a budget line` : "✓ Every item has a budget line"}</span></div>`;
+    <span class="sub">${left ? `${left} item${left > 1 ? "s" : ""} still need an area and budget line` : "✓ Every item has an area and budget line"}${a.some(x => x.area && areaEnt(x.area) !== c.entity) ? ` · ⚠ charged differently from the claimant's choice of ${esc(c.entity)}` : ""}</span></div>`;
 }
 function onAlloc(e){
   const t = e.target; if (!t.dataset || t.dataset.alloc == null) return false;
   if (e.type !== "change") return true;
   const c = S.claims.find(x => x.id === t.dataset.alloc); if (!c) return true;
   const a = allocFor(c), k = t.dataset.ak, v = t.value;
-  const set = x => { if (k === "entity"){ x.entity = v; const b = blByKey(x.line); if (b && !(v === "RHC" ? b.rhc : b.garc)) x.line = ""; }
-    else { x.line = v; const b = blByKey(v); if (b && !(x.entity === "RHC" ? b.rhc : b.garc)) x.entity = b.rhc ? "RHC" : "GARC"; } };
+  const set = x => { if (k === "area"){ x.area = v; const b = blByKey(x.line); if (b && v && !lineAreas(b).some(z => areaEnt(z) === areaEnt(v))) x.line = ""; }
+    else { x.line = v; const b = blByKey(v); if (b && (!x.area || !lineAreas(b).some(z => areaEnt(z) === areaEnt(x.area)))) x.area = lineAreas(b)[0]; } };
   if (t.dataset.ai === "all") a.forEach(set); else set(a[+t.dataset.ai]);
   render(); return true;
 }
@@ -669,7 +725,7 @@ function onAlloc(e){
 function exSet(f){ const all = S.claims.filter(c => c.type === "expense" && ["approved","processed"].includes(c.status)); return f === "ready" ? all.filter(c => c.status === "approved") : f === "processed" ? all.filter(c => c.status === "processed") : all; }
 function exFiltered(){
   const F = S.ex, q = (F.q || "").trim().toLowerCase();
-  return exSet(S.exFilter).filter(c => (!F.month || isoDay(c.submitted_at).slice(0, 7) === F.month) && (!F.entity || c.entity === F.entity || (c.lines || []).some(l => l.charge_to === F.entity))
+  return exSet(S.exFilter).filter(c => (!F.month || isoDay(c.submitted_at).slice(0, 7) === F.month) && (!F.entity || c.entity === F.entity || (c.lines || []).some(l => l.charge_to === F.entity)) && (!F.area || (c.lines || []).some(l => l.area === F.area))
     && (!q || [personName(c.claimant), c.ref, c.description, c.team].join(" ").toLowerCase().includes(q)));
 }
 function viewExpenses(){
@@ -682,6 +738,7 @@ function viewExpenses(){
     <section class="panel bkfilters" style="padding:14px"><div class="bkgrid">
       ${sel("month", "Submitted in", months.map(m => [m, monthName(m)]))}
       ${sel("entity", "RHC or GARC", [["RHC","RHC"],["GARC","GARC"]])}
+      ${sel("area", "Budget area", AREAS.map(([k]) => [k, areaName(k)]))}
       <label>Search<input data-ex-k="q" id="ex-q" type="search" value="${esc(F.q || "")}" placeholder="Name, ref, team"></label>
     </div></section>`;
   if (list.length){
@@ -703,9 +760,9 @@ function processBox(c){
 const bookkeeperNames = () => Object.values(S.people).filter(p => p.active && p.is_bookkeeper).map(p => p.full_name).join(" or ") || "not set yet";
 const csvCell = v => { v = v == null ? "" : String(v); return /[",\r\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
 async function exportExpenses(){
-  const rows = [["Ref","Status","Claimant","Email","RHC/GARC chosen","Team","Description","Submitted","Approved by","Approved on","Processed on","Payment ref","Item date","Item","Supplier","Amount","Charged to","Budget code","Budget line","Claim total","Receipts","Account name","Sort code","Account number"]];
+  const rows = [["Ref","Status","Claimant","Email","RHC/GARC chosen","Team","Description","Submitted","Approved by","Approved on","Processed on","Payment ref","Item date","Item","Supplier","Amount","Charged to","Area","Budget code","Budget line","Claim total","Receipts","Account name","Sort code","Account number"]];
   for (const c of exFiltered()){ const p = S.people[c.claimant] || {}, b = S.banks[c.claimant] || {};
-    for (const l of c.lines || []) rows.push([c.ref, st(c).label, personName(c.claimant), p.email || "", c.entity, c.team, c.description, isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), isoDay(c.processed_at), c.payment_ref || "", l.date, exLineText(l), isMile(l) ? "Mileage" : l.supplier, l.amount, l.charge_to || "", l.budget_code || "", l.budget_label || "", c.total, (c.attachments || []).map(a => a.name).join("; "), b.account_name || "", fmtSort(b.sort_code), b.account_number || ""]); }
+    for (const l of c.lines || []) rows.push([c.ref, st(c).label, personName(c.claimant), p.email || "", c.entity, c.team, c.description, isoDay(c.submitted_at), c.first_approver ? personName(c.first_approver) : "", isoDay(c.first_approved_at), isoDay(c.processed_at), c.payment_ref || "", l.date, exLineText(l), isMile(l) ? "Mileage" : l.supplier, l.amount, l.charge_to || "", l.area ? (AREAS.find(a => a[0] === l.area) || [])[1] : "", l.budget_code || "", l.budget_label || "", c.total, (c.attachments || []).map(a => a.name).join("; "), b.account_name || "", fmtSort(b.sort_code), b.account_number || ""]); }
   await saveFile(`rhc-expenses-${S.exFilter}-${today()}.csv`, new Blob(["﻿" + rows.map(r => r.map(csvCell).join(",")).join("\r\n")], {type:"text/csv"}));
 }
 async function expensePdf(c){
@@ -725,7 +782,7 @@ async function expensePdf(c){
   doc.setFillColor(233, 238, 245); doc.rect(L, y - 5, R - L, 8, "F"); doc.setFont("helvetica", "bold"); doc.setFontSize(9);
   cols.forEach(([x, h, w], i) => text(h, i === 4 ? R - 2 : x + 2, y, i === 4 ? {align:"right"} : {})); y += 8; doc.setFont("helvetica", "normal"); doc.setFontSize(9.5);
   for (const l of c.lines || []){
-    const cells = [fmtDate(l.date), isMile(l) ? exLineText(l) : l.item, isMile(l) ? "Mileage" : l.supplier || "", l.budget_label ? `${l.charge_to} - ${l.budget_code ? l.budget_code + " " : ""}${l.budget_label}` : c.entity].map((v, i) => doc.splitTextToSize(ascii(v || ""), cols[i][2] - 3));
+    const cells = [fmtDate(l.date), isMile(l) ? exLineText(l) : l.item, isMile(l) ? "Mileage" : l.supplier || "", l.budget_label ? chargeText(l) : c.entity].map((v, i) => doc.splitTextToSize(ascii(v || ""), cols[i][2] - 3));
     const hgt = Math.max(...cells.map(x => x.length)) * 4.6;
     if (y + hgt > 260){ doc.addPage(); y = 20; }
     cells.forEach((v, i) => text(v, cols[i][0] + 2, y)); text(gbp(l.amount), R - 2, y, {align:"right"});
@@ -780,12 +837,12 @@ function defaultPayMonth(){
 function viewPayroll(){
   if (!S.payMonth) S.payMonth = defaultPayMonth();
   const R = payrollRun(S.payMonth), M = S.payMonth, withHours = R.rows.filter(r => r.hours);
-  let h = `<div><h2>Payroll</h2><p class="lede">Payroll runs from the 1st to the last day of each month, and timesheets are due by the ${dueDay()}th of the next month. Choose a month to collate every approved session into one record per coach, with their average hourly rate and the ${holPct()}% holiday pay worked out from the total.</p></div>
+  let h = `<div><h2>Payroll</h2><p class="lede">Payroll runs from the 1st to the last day of each month, and coaches are asked for timesheets by the ${ordinal(askDay())} of the next month (reminders go out on the ${reminderDays().map(ordinal).join(" and ")}). Anything submitted up to the ${ordinal(dueDay())} still goes into that month's payroll. Choose a month to collate every approved session into one record per coach, with their average hourly rate and the ${holPct()}% holiday pay worked out from the total.</p></div>
     <section class="panel" style="padding:14px"><div class="row">
       <label style="flex:1;min-width:200px">Payroll month<select data-act-change="pay-month" id="payMonth">${payrollMonths().map(m => `<option value="${m}" ${m === M ? "selected" : ""}>${monthName(m)}${S.claims.some(c => isTs(c) && c.payroll_run === m) ? " · processed" : ""}</option>`).join("")}</select></label>
       <button class="btn primary" data-act="gen-payroll">Generate payroll (Excel)</button>
     </div>
-    <p class="sub" style="margin:0">Covers sessions from 1 to ${lastDay(M)} ${monthName(M)} (due ${fmtDate(dueDate(M))}), plus any late timesheets that have rolled into this run.</p></section>`;
+    <p class="sub" style="margin:0">Covers sessions from 1 to ${lastDay(M)} ${monthName(M)} (due ${fmtDate(askDate(M))}, final cut-off ${fmtDate(dueDate(M))}), plus any late timesheets that have rolled into this run.</p></section>`;
   if (R.waiting.length) h += `<div class="notice warn"><strong>${R.waiting.length} timesheet${R.waiting.length > 1 ? "s" : ""} for this payroll ${R.waiting.length > 1 ? "aren't" : "isn't"} approved yet:</strong> ${R.waiting.map(c => `${esc(c.ref)} (${esc(personName(c.claimant))}, ${esc(st(c).label.toLowerCase())})`).join(", ")}. ${R.waiting.length > 1 ? "They" : "It"} won't be included unless approved before you generate. If approved later, ${R.waiting.length > 1 ? "they roll" : "it rolls"} into the next payroll.</div>`;
   const fl = R.run.filter(c => (c.flags || []).length);
   if (fl.length) h += `<details class="notice warn"><summary style="color:inherit">${fl.length} timesheet${fl.length > 1 ? "s" : ""} in this payroll ${fl.length > 1 ? "were" : "was"} flagged as a possible double claim or long day, and approved anyway</summary><ul style="margin:6px 0 0;padding-left:1.2em">${fl.map(c => `<li><strong>${esc(c.ref)}</strong> ${esc(personName(c.claimant))}, approved by ${esc(personName(c.first_approver))}: ${c.flags.map(f => esc(f.text)).join(" ")}${c.flag_note ? ` <em>“${esc(c.flag_note)}”</em>` : ""}</li>`).join("")}</ul></details>`;
@@ -868,6 +925,10 @@ function viewPeople(){
       <label><input type="checkbox" data-r="finance" ${p.is_finance ? "checked" : ""}> Finance (approves expenses)</label>
       <label><input type="checkbox" data-r="books" ${p.is_bookkeeper ? "checked" : ""}> Bookkeeper</label>
       <label><input type="checkbox" data-r="admin" ${p.is_admin ? "checked" : ""}> Admin</label>
+      <label><input type="checkbox" data-r="firstxi" ${p.is_first_xi ? "checked" : ""}> 1st XI player (away-match mileage)</label>
+      <div class="payby"><label><input type="checkbox" data-r="contract" ${p.contract_mileage ? "checked" : ""}> Mileage under contract:</label>
+        <label>£ per mile <input type="number" step="0.01" min="0" data-r="crate" value="${p.contract_mileage_rate == null ? "" : esc(p.contract_mileage_rate)}" style="width:80px"></label>
+        <label>free miles per journey <input type="number" step="1" min="0" data-r="cfree" value="${p.contract_free_miles == null ? "" : esc(p.contract_free_miles)}" style="width:70px"></label></div>
       <details class="actrates" ${(p.captain_sections || []).length ? "open" : ""}><summary>Section captain (approves timesheets)${(p.captain_sections || []).length ? `: ${esc((p.captain_sections || []).map(sectionLabel).filter(Boolean).join(", "))}` : ""}</summary>
         <div class="capgrid">${sections().map(x => `<label><input type="checkbox" data-r="cap" value="${esc(x.key)}" ${(p.captain_sections || []).includes(x.key) ? "checked" : ""}> ${esc(x.label)}</label>`).join("")}</div>
       </details>
@@ -896,8 +957,11 @@ function viewPeople(){
 async function savePerson(id){
   const r = document.querySelector(`[data-person="${CSS.escape(id)}"]`), q = s => r.querySelector(s);
   const ar = {}; r.querySelectorAll("[data-actrate]").forEach(i => { const v = String(i.value).trim(); if (v !== "") ar[i.dataset.actrate] = String(r2(v)); });
+  if (q('[data-r="contract"]').checked && !(num(q('[data-r="crate"]').value) > 0)){ toast("Enter the contract mileage rate in £ per mile"); return; }
   const p = {active:q('[data-r="active"]').checked, is_dofh:q('[data-r="dofh"]').checked, is_finance:q('[data-r="finance"]').checked, is_bookkeeper:q('[data-r="books"]').checked, is_admin:q('[data-r="admin"]').checked,
-    captain_sections:[...r.querySelectorAll('[data-r="cap"]:checked')].map(i => i.value), own_rates:(r.querySelector('[data-r="payby"]:checked') || {}).value === "own", activity_rates:ar};
+    captain_sections:[...r.querySelectorAll('[data-r="cap"]:checked')].map(i => i.value),
+    is_first_xi:q('[data-r="firstxi"]').checked, contract_mileage:q('[data-r="contract"]').checked,
+    contract_mileage_rate:blank(q('[data-r="crate"]').value) ? null : num(q('[data-r="crate"]').value), contract_free_miles:blank(q('[data-r="cfree"]').value) ? 0 : num(q('[data-r="cfree"]').value), own_rates:(r.querySelector('[data-r="payby"]:checked') || {}).value === "own", activity_rates:ar};
   const {error} = await S.sb.rpc("admin_update_person", {p_user:id, p});
   if (error){ toast(errText(error)); return; }
   toast("Saved " + (S.people[id] && S.people[id].full_name || "")); await loadAll(false);
@@ -908,9 +972,12 @@ function viewSettings(){
   const s = S.settings;
   return `<div><h2>Settings</h2><p class="lede">Club-wide settings for timesheets and expense claims.</p></div>
   <section class="panel"><h3>Payroll and contacts</h3><div class="grid">
-    <label>Timesheets due by day <span class="hint">of the following month</span><input id="sDue" type="number" min="1" max="28" step="1" value="${esc(dueDay())}"></label>
+    <label>Timesheet deadline told to coaches <span class="hint">day of the following month</span><input id="sAsk" type="number" min="1" max="28" step="1" value="${esc(askDay())}"></label>
+    <label>Final cut-off for that month's payroll <span class="hint">day; later timesheets roll into the next payroll</span><input id="sDue" type="number" min="1" max="28" step="1" value="${esc(dueDay())}"></label>
+    <label>Reminder emails to coaches <span class="hint">days of the month, e.g. 1, 5</span><input id="sRem" value="${esc(reminderDays().join(", "))}"></label>
     <label>Mileage rate (£ per mile)<input id="sRate" type="number" min="0" step="0.01" value="${esc(mileRate())}"></label>
-    <label>Free miles per journey <span class="hint">not claimable</span><input id="sFree" type="number" min="0" step="1" value="${esc(freeMiles())}"></label>
+    <label>Coaching mileage: free miles per journey <span class="hint">not claimable</span><input id="sFree" type="number" min="0" step="1" value="${esc(freeMiles())}"></label>
+    <label>1st XI mileage: minimum players in the car<input id="sMinPl" type="number" min="1" max="9" step="1" value="${esc(minPlayers())}"></label>
     <label>Daily hours limit <span class="hint">more than this in one day gets flagged</span><input id="sMaxDay" type="number" min="1" max="24" step="0.5" value="${esc(maxDay())}"></label>
     <label>Holiday pay % <span class="hint">included in the hourly rates</span><input id="sHol" type="number" min="0" step="0.01" value="${esc(holPct())}"></label>
     <label>Payroll budget code <span class="hint">shown on the payroll spreadsheet</span><input id="sCode" value="${esc(payCode())}"></label>
@@ -932,9 +999,9 @@ function viewSettings(){
     <div class="row" style="justify-content:space-between"><button class="btn small" data-act="act-add">+ Add heading</button><button class="btn primary" data-act="act-save">Save headings</button></div>
   </section>
   <section class="panel" id="blEditor">
-    <div><h3>Budget lines</h3><p class="sub" style="margin:4px 0 0">When finance approves an expense claim, they choose one of these for each item. Tick which of RHC and GARC each line can be used for.</p></div>
-    <div class="tablebox"><table class="lines"><thead><tr><th style="width:7em">Code</th><th>Budget line</th><th>RHC</th><th>GARC</th><th></th></tr></thead><tbody>
-    ${blDraft().map((x, i) => `<tr><td><input data-bl-i="${i}" data-bl-k="code" value="${esc(x.code || "")}" aria-label="Code" placeholder="none"></td><td><input data-bl-i="${i}" data-bl-k="label" value="${esc(x.label)}" aria-label="Budget line name"></td><td><input type="checkbox" data-bl-i="${i}" data-bl-k="rhc" ${x.rhc ? "checked" : ""} aria-label="Available to RHC"></td><td><input type="checkbox" data-bl-i="${i}" data-bl-k="garc" ${x.garc ? "checked" : ""} aria-label="Available to GARC"></td><td><button class="btn small danger" data-act="bl-del" data-i="${i}" aria-label="Remove budget line">✕</button></td></tr>`).join("")}
+    <div><h3>Budget lines</h3><p class="sub" style="margin:4px 0 0">When finance approves an expense claim, they choose one of these for each item. Tick the budget areas each line appears in; finance sees those lines first for that area.</p></div>
+    <div class="tablebox"><table class="lines"><thead><tr><th style="width:7em">Code</th><th>Budget line</th>${AREAS.map(([k, n]) => `<th title="${esc(areaName(k))}">${esc(k === "schools" ? "Schools" : k === "ta" ? "TA" : n)}</th>`).join("")}<th></th></tr></thead><tbody>
+    ${blDraft().map((x, i) => `<tr><td><input data-bl-i="${i}" data-bl-k="code" value="${esc(x.code || "")}" aria-label="Code" placeholder="none"></td><td><input data-bl-i="${i}" data-bl-k="label" value="${esc(x.label)}" aria-label="Budget line name"></td>${AREAS.map(([k]) => `<td><input type="checkbox" data-bl-i="${i}" data-bl-k="area:${k}" ${lineAreas(x).includes(k) ? "checked" : ""} aria-label="${esc(areaName(k))}"></td>`).join("")}<td><button class="btn small danger" data-act="bl-del" data-i="${i}" aria-label="Remove budget line">✕</button></td></tr>`).join("")}
     </tbody></table></div>
     <div class="row" style="justify-content:space-between"><button class="btn small" data-act="bl-add">+ Add budget line</button><button class="btn primary" data-act="bl-save">Save budget lines</button></div>
   </section>`;
@@ -1026,7 +1093,7 @@ document.addEventListener("click", async e => {
     case "entity-change": S.draft.entity = ""; render(); break;
     case "add-line": { const d = S.draft, last = d.lines[d.lines.length - 1] || {};
       d.lines.push(d.type === "timesheet" ? {date: last.date || d.work_month + "-01", activity_key: last.activity_key || "", session: "", hours: ""} : {date: last.date || today(), item: "", supplier: "", amount: ""}); render(); break; }
-    case "add-mileage": { const d = S.draft, last = [...d.lines].reverse().find(isMile) || {}; d.lines.push({kind:"mileage", date: today(), from: last.from || "", to: "", purpose: "", miles: "", ret: true}); render(); { const t = $(`#ln-${d.lines.length - 1}-from`); if (t) t.focus(); } break; }
+    case "add-mileage": { const d = S.draft, last = [...d.lines].reverse().find(isMile) || {}; d.lines.push({kind:"mileage", basis: myBases().includes(last.basis) ? last.basis : myBases()[0], date: today(), from: last.from || "", to: "", purpose: "", miles: "", ret: true}); render(); { const t = $(`#ln-${d.lines.length - 1}-basis`); if (t) t.focus(); } break; }
     case "del-line": S.draft.lines.splice(+b.dataset.i, 1); render(); break;
     case "del-file": { const [gone] = S.draft.attachments.splice(+b.dataset.i, 1); syncUploadState(); saveLocalDraft();
       if (gone && !S.draft.editingId) S.sb.storage.from("receipts").remove([gone.path]); break; }
@@ -1094,7 +1161,7 @@ document.addEventListener("click", async e => {
     case "edit-claim": { const c = claim(); if (!c) break;
       S.draft = c.type === "timesheet"
         ? {type:"timesheet", editingId:c.id, editingRef:c.ref, section:c.section || "", work_month:c.work_month, description:c.description || "", flag_note:c.flag_note || "", flag_ok:false, lines:(c.lines || []).map(l => ({date:l.date, activity_key:l.activity_key, session:l.session, hours:l.hours, rate:l.own_rate ? l.rate : undefined})), declare:false}
-        : {type:"expense", editingId:c.id, editingRef:c.ref, entity:c.entity, description:c.description || "", team:c.team || "", lines:(c.lines || []).map(l => isMile(l) ? {kind:"mileage", date:l.date, from:l.from, to:l.to, purpose:l.purpose, miles:l.miles, ret:!!l.ret} : {kind:"item", date:l.date, item:l.item, supplier:l.supplier, amount:l.amount}), attachments:(c.attachments || []).slice(), declare:false};
+        : {type:"expense", editingId:c.id, editingRef:c.ref, entity:c.entity, description:c.description || "", team:c.team || "", lines:(c.lines || []).map(l => isMile(l) ? {kind:"mileage", basis:l.basis || "coaching", date:l.date, from:l.from, to:l.to, purpose:l.purpose, miles:l.miles, ret:!!l.ret, players:l.players, rt_club:l.rt_club, rt_origin:l.rt_origin, chair_ok:!!l.chair_ok, chair_date:l.chair_date} : {kind:"item", date:l.date, item:l.item, supplier:l.supplier, amount:l.amount}), attachments:(c.attachments || []).slice(), declare:false};
       S.tab = "new"; S.lastSubmitted = null; render(); window.scrollTo(0,0); break; }
     case "delete-claim": S.confirmDelete = id; render(); break;
     case "delete-cancel": S.confirmDelete = null; render(); break;
@@ -1105,9 +1172,9 @@ document.addEventListener("click", async e => {
       if (paths.length) S.sb.storage.from("receipts").remove(paths);
       toast("Deleted"); await loadAll(false); render(); break; }
     case "approve": { const c = claim(); if (!c) break; const args = {p_claim_id:id};
-      if (c.type === "expense"){ const al = allocFor(c), miss = al.findIndex(x => !x.entity || !x.line);
-        if (miss >= 0){ toast(`Item ${miss + 1}: choose a budget line`); break; }
-        args.p_allocations = al.map(x => ({entity: x.entity, line: x.line})); }
+      if (c.type === "expense"){ const al = allocFor(c), miss = al.findIndex(x => !x.area || !x.line);
+        if (miss >= 0){ toast(`Item ${miss + 1}: choose the area and budget line`); break; }
+        args.p_allocations = al.map(x => ({area: x.area, entity: areaEnt(x.area), line: x.line})); }
       b.disabled = true; rpc("approve_claim", args, `${c.ref} approved. ${c.type === "expense" ? "The bookkeeper has been emailed." : "It's ready for the " + monthName(c.payroll_month) + " payroll."}`); break; }
     case "reject": S.decideOpen = id; render(); { const t = $("#rejNote-" + CSS.escape(id)); if (t) t.focus(); } break;
     case "reject-cancel": S.decideOpen = null; render(); break;
@@ -1134,14 +1201,15 @@ document.addEventListener("click", async e => {
       for (const x of actDraft()){ const label = String(x.label || "").trim(); if (!label){ toast("Every heading needs a name"); return; } list.push({key: keyFrom({key: x.key, label}, used, "heading"), label, group: x.group || "Programmes", rate: null}); }
       const {error} = await S.sb.rpc("admin_update_payroll_activities", {p_list: list}); if (error){ toast(errText(error)); break; }
       S.actDraft = null; toast("Headings saved"); await loadAll(false); render(); break; }
-    case "bl-add": blDraft().push({key: "", code: "", label: "", rhc: true, garc: false}); render(); break;
+    case "bl-add": blDraft().push({key: "", code: "", label: "", areas: ["hockey"], rhc: true, garc: false}); render(); break;
     case "bl-del": blDraft().splice(+b.dataset.i, 1); render(); break;
     case "bl-save": { const used = new Set(), list = [];
-      for (const x of blDraft()){ const label = String(x.label || "").trim(), code = String(x.code || "").trim(); if (!label){ toast("Every budget line needs a name"); return; } if (!x.rhc && !x.garc){ toast(`Tick RHC, GARC or both for ${label}`); return; }
-        list.push({key: keyFrom({key: x.key, code, label}, used, "line"), code, label, rhc: !!x.rhc, garc: !!x.garc}); }
+      for (const x of blDraft()){ const label = String(x.label || "").trim(), code = String(x.code || "").trim(); if (!label){ toast("Every budget line needs a name"); return; } const areas = AREAS.map(a => a[0]).filter(k => lineAreas(x).includes(k)); if (!areas.length){ toast(`Tick at least one area for ${label}`); return; }
+        list.push({key: keyFrom({key: x.key, code, label}, used, "line"), code, label, areas, rhc: areas.some(a => a !== "garc"), garc: areas.includes("garc")}); }
       const {error} = await S.sb.rpc("admin_update_budget_lines", {p_list: list}); if (error){ toast(errText(error)); break; }
       S.blDraft = null; toast("Budget lines saved"); await loadAll(false); render(); break; }
-    case "save-settings": rpc("admin_update_settings", {p: {timesheet_due_day: Math.round(num($("#sDue").value)) || 10, max_daily_hours: num($("#sMaxDay").value) || 5, mileage_rate: num($("#sRate").value), mileage_free_miles: Math.max(0, num($("#sFree").value)), holiday_pay_pct: num($("#sHol").value), payroll_code: $("#sCode").value.trim(), chair_email: $("#sChair").value.trim(), finance_email: $("#sFin").value.trim()}}, "Settings saved"); break;
+    case "save-settings": rpc("admin_update_settings", {p: {timesheet_due_day: Math.round(num($("#sDue").value)) || 10, coach_deadline_day: Math.round(num($("#sAsk").value)) || 7,
+      reminder_days: [...new Set(String($("#sRem").value).split(/[^0-9]+/).filter(Boolean).map(Number).filter(n => n >= 1 && n <= 28))].sort((a, b) => a - b), max_daily_hours: num($("#sMaxDay").value) || 5, mileage_rate: num($("#sRate").value), mileage_free_miles: Math.max(0, num($("#sFree").value)), first_xi_min_players: Math.max(1, Math.round(num($("#sMinPl").value)) || 3), holiday_pay_pct: num($("#sHol").value), payroll_code: $("#sCode").value.trim(), chair_email: $("#sChair").value.trim(), finance_email: $("#sFin").value.trim()}}, "Settings saved"); break;
   }
 });
 function onExField(e){
@@ -1161,14 +1229,15 @@ function onField(e){
   const t = e.target;
   if (onAlloc(e) || onPayBy(e) || onExField(e)) return;
   if (t.id === "payMonth"){ if (e.type === "change"){ S.payMonth = t.value; S.confirmRun = false; render(); } return; }
-  if (t.dataset && t.dataset.blI != null){ const row = blDraft()[+t.dataset.blI]; if (row) row[t.dataset.blK] = t.type === "checkbox" ? t.checked : t.value; return; }
+  if (t.dataset && t.dataset.blI != null){ const row = blDraft()[+t.dataset.blI]; if (!row) return; const k = t.dataset.blK;
+    if (k.startsWith("area:")){ const a = k.slice(5), cur = lineAreas(row).filter(z => z !== a); row.areas = t.checked ? cur.concat([a]) : cur; } else row[k] = t.type === "checkbox" ? t.checked : t.value; return; }
   if (t.dataset && t.dataset.secI != null){ const row = secDraft()[+t.dataset.secI]; if (row) row.label = t.value; return; }
   if (t.dataset && t.dataset.actI != null){ const row = actDraft()[+t.dataset.actI]; if (row) row[t.dataset.actK] = t.value; return; }
   const d = S.draft; if (!d || !t.closest("#claimForm")) return;
   const val = t.type === "checkbox" ? t.checked : t.value;
   if (t.dataset.f){ d[t.dataset.f] = val;
     if (t.dataset.f === "work_month" && e.type === "change"){ d.lines.forEach(l => { if (!l.date || l.date.slice(0, 7) !== val) l.date = val + "-01"; }); saveLocalDraft(); render(); return; } }
-  else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ l[t.dataset.k] = val; if (t.dataset.k === "activity_key" && e.type === "change"){ saveLocalDraft(); render(); return; } recalc(); } }
+  else if (t.dataset.line != null){ const l = d.lines[+t.dataset.line]; if (l){ l[t.dataset.k] = val; if ((t.dataset.k === "activity_key" || t.dataset.k === "basis") && e.type === "change"){ saveLocalDraft(); render(); return; } recalc(); } }
   clearTimeout(onField._t); onField._t = setTimeout(saveLocalDraft, 400);
 }
 document.addEventListener("input", onField);

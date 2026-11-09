@@ -209,3 +209,10 @@ table.payroll .tsrefs{white-space:normal;font-size:.75rem}
 .lines.miles input{min-width:70px}
 .lines.miles input[type="date"]{min-width:130px}
 .lines.miles input.w-s{width:70px}
+.journey{border:1px solid var(--line);border-radius:var(--r);padding:14px;display:flex;flex-direction:column;gap:10px;margin-bottom:10px}
+.jgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px 12px;align-items:end}
+.jgrid label.chk{flex-direction:row;align-items:center;gap:8px;font-weight:400;padding-bottom:8px}
+#blEditor td:nth-child(2) input{min-width:250px}
+#blEditor td:first-child input{min-width:70px;width:80px}
+#blEditor th,#blEditor td{text-align:center}
+#blEditor th:nth-child(2),#blEditor td:nth-child(2),#blEditor th:first-child,#blEditor td:first-child{text-align:left}
