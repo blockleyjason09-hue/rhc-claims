@@ -608,7 +608,7 @@ function claimDetail(c, open){
   if (c.type === "timesheet"){
     const by = new Map(); for (const l of c.lines || []){ const k = actLabel(l) + "|" + num(l.rate), x = by.get(k) || {label: actLabel(l), rate: num(l.rate), h: 0, a: 0}; x.h += num(l.hours); x.a += num(l.amount); by.set(k, x); }
     body = `<div class="tablebox"><table><thead><tr><th>Date</th><th>Heading</th><th>Comment</th><th class="num">Hours</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead>
-      <tbody>${(c.lines || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(actLabel(l))}${l.own_rate ? ` <span class="pill pending">own rate</span>` : ""}</td><td>${esc(l.session)}</td><td class="num">${esc(fmtH(l.hours))}</td><td class="num">${gbp(l.rate)}</td><td class="num">${gbp(l.amount)}</td></tr>`).join("")}</tbody></table></div>
+      <tbody>${(c.lines || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(l => `<tr><td>${fmtDate(l.date)}</td><td>${esc(actLabel(l))}${l.own_rate ? ` <span class="pill pending">own rate</span>` : ""}</td><td>${esc(l.session)}</td><td class="num">${esc(fmtH(l.hours))}</td><td class="num">${gbp(l.rate)}${l.original_rate != null ? `<div class="sub">changed from ${gbp(l.original_rate)} by ${esc(personName(l.rate_changed_by))}</div>` : ""}</td><td class="num">${gbp(l.amount)}</td></tr>`).join("")}</tbody></table></div>
       ${by.size > 1 ? `<div class="tablebox"><table><thead><tr><th>By heading</th><th class="num">Hours</th><th class="num">Rate</th><th class="num">Amount</th></tr></thead><tbody>${[...by.values()].map(x => `<tr><td>${esc(x.label)}</td><td class="num">${esc(fmtH(x.h))}</td><td class="num">${gbp(x.rate)}</td><td class="num">${gbp(x.a)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
   } else {
     const coded = (c.lines || []).some(l => l.budget_label);
@@ -685,7 +685,37 @@ function viewApprove(){
 }
 function decideBox(c){
   if (S.decideOpen === c.id) return `<div class="decide"><label>Reason for returning <span class="hint">The claimant sees this and can fix and resubmit.</span><textarea id="rejNote-${esc(c.id)}"></textarea></label><div class="row end"><button class="btn" data-act="reject-cancel">Cancel</button><button class="btn danger" data-act="reject-yes" data-id="${esc(c.id)}">Return</button></div></div>`;
-  return `${c.type === "expense" ? allocBox(c) : ""}<div class="decide row end" style="flex-direction:row"><button class="btn danger" data-act="reject" data-id="${esc(c.id)}">Return to claimant</button><button class="btn good" data-act="approve" data-id="${esc(c.id)}">Approve · ${gbp(c.total)}</button></div>`;
+  return `${c.type === "expense" ? allocBox(c) : rateBox(c)}<div class="decide row end" style="flex-direction:row"><button class="btn danger" data-act="reject" data-id="${esc(c.id)}">Return to claimant</button><button class="btn good" data-act="approve" data-id="${esc(c.id)}" id="appr-${esc(c.id)}">Approve · ${gbp(c.type === "timesheet" ? rateTotal(c) : c.total)}</button></div>`;
+}
+/* Timesheets: the approver can change the hourly rate on any session before approving. */
+function ratesFor(c){
+  S.rates = S.rates || {};
+  const n = (c.lines || []).length;
+  if (!S.rates[c.id] || S.rates[c.id].length !== n) S.rates[c.id] = (c.lines || []).map(l => String(num(l.rate)));
+  return S.rates[c.id];
+}
+const rateTotal = c => r2((c.lines || []).reduce((t, l, i) => t + r2(num(l.hours) * num(ratesFor(c)[i])), 0));
+function rateBox(c){
+  const R = ratesFor(c), id = esc(c.id), lines = c.lines || [];
+  const order = lines.map((l, i) => i).sort((a, b) => String(lines[a].date).localeCompare(String(lines[b].date)));
+  return `<details class="alloc" ${R.some((v, i) => num(v) !== num(lines[i].rate)) ? "open" : ""}><summary>Check or change the hourly rates</summary>
+    <p class="sub" style="margin:4px 0 8px">Change a rate only if it's wrong for that session. The coach sees the original and the new rate.</p>
+    <div class="tablebox"><table><thead><tr><th>Date</th><th>Heading</th><th>Comment</th><th class="num">Hours</th><th class="num">Rate £/hr</th><th class="num">Amount</th></tr></thead><tbody>
+    ${order.map(i => { const l = lines[i], ch = num(R[i]) !== num(l.rate); return `<tr><td>${fmtDate(l.date)}</td><td>${esc(actLabel(l))}</td><td>${esc(l.session)}</td><td class="num">${esc(fmtH(l.hours))}</td>
+      <td class="num"><input type="number" step="0.01" min="0" inputmode="decimal" class="w-s" style="width:84px" data-rate="${id}" data-ri="${i}" value="${esc(R[i])}" aria-label="Rate for ${esc(fmtDate(l.date))}">
+      <div class="sub" id="rw-${id}-${i}" ${ch ? "" : "hidden"}>was ${gbp(l.rate)}</div></td><td class="num" id="ra-${id}-${i}">${gbp(r2(num(l.hours) * num(R[i])))}</td></tr>`; }).join("")}
+    </tbody></table></div>
+    <span class="sub" id="rt-${id}">Total ${gbp(rateTotal(c))}${rateTotal(c) !== r2(c.total) ? ` (was ${gbp(c.total)})` : ""}</span></details>`;
+}
+function onRate(e){
+  const t = e.target; if (!t.dataset || t.dataset.rate == null) return false;
+  const c = S.claims.find(x => x.id === t.dataset.rate); if (!c) return true;
+  const i = +t.dataset.ri, R = ratesFor(c), l = c.lines[i], id = c.id; R[i] = t.value;
+  const a = $(`#ra-${CSS.escape(id)}-${i}`); if (a) a.textContent = gbp(r2(num(l.hours) * num(R[i])));
+  const w = $(`#rw-${CSS.escape(id)}-${i}`); if (w) w.hidden = num(R[i]) === num(l.rate);
+  const tot = rateTotal(c), rt = $(`#rt-${CSS.escape(id)}`); if (rt) rt.textContent = `Total ${gbp(tot)}${tot !== r2(c.total) ? ` (was ${gbp(c.total)})` : ""}`;
+  const b = $(`#appr-${CSS.escape(id)}`); if (b) b.textContent = `Approve · ${gbp(tot)}`;
+  return true;
 }
 function allocFor(c){
   const n = (c.lines || []).length;
@@ -903,13 +933,13 @@ async function generatePayroll(){
   ws.getColumn(1).width = 24; ws.getColumn(2).width = 18; ws.getColumn(3).width = 9; ws.getColumn(4).width = 9; ws.getColumn(5).width = 11; ws.getColumn(6).width = 9; ws.getColumn(7).width = 11; ws.getColumn(8).width = 34; ws.getColumn(9).width = 11;
   for (let k = H0 + 1; k <= HL + 1; k++) ws.getColumn(k).width = 10.5; ws.getColumn(CC + 1).width = 50;
   const s2 = wb.addWorksheet("Sessions", {views: [{state: "frozen", ySplit: 1}]});
-  s2.addRow(["Name", "Ref", "Date", "Timesheet heading", "Comment", "Hours", "Rate £/hr", "Amount £", "Month worked", "Late", "Submitted", "Approved by", "Approved on", "Section"]).font = {bold: true};
+  s2.addRow(["Name", "Ref", "Date", "Timesheet heading", "Comment", "Hours", "Rate £/hr", "Rate changed from", "Amount £", "Month worked", "Late", "Submitted", "Approved by", "Approved on", "Section"]).font = {bold: true};
   for (const c of R.run.slice().sort((a, b) => personName(a.claimant).localeCompare(personName(b.claimant)) || String(a.ref).localeCompare(String(b.ref))))
     for (const l of (c.lines || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date))))
-      s2.addRow([personName(c.claimant), c.ref, l.date, actLabel(l), l.session, num(l.hours), num(l.rate), num(l.amount), monthName(c.work_month), c.late ? "Yes" : "", isoDay(c.submitted_at), personName(c.first_approver), isoDay(c.first_approved_at), c.section_label || sectionLabel(c.section)]);
-  [24, 10, 11, 30, 34, 7, 9, 10, 14, 6, 11, 18, 11, 22].forEach((w, i) => s2.getColumn(i + 1).width = w);
-  s2.getColumn(7).numFmt = "0.00"; s2.getColumn(8).numFmt = "0.00";
-  s2.autoFilter = {from: {row: 1, column: 1}, to: {row: 1, column: 14}};
+      s2.addRow([personName(c.claimant), c.ref, l.date, actLabel(l), l.session, num(l.hours), num(l.rate), l.original_rate != null ? num(l.original_rate) : "", num(l.amount), monthName(c.work_month), c.late ? "Yes" : "", isoDay(c.submitted_at), personName(c.first_approver), isoDay(c.first_approved_at), c.section_label || sectionLabel(c.section)]);
+  [24, 10, 11, 30, 34, 7, 9, 11, 10, 14, 6, 11, 18, 11, 22].forEach((w, i) => s2.getColumn(i + 1).width = w);
+  s2.getColumn(7).numFmt = "0.00"; s2.getColumn(8).numFmt = "0.00"; s2.getColumn(9).numFmt = "0.00";
+  s2.autoFilter = {from: {row: 1, column: 1}, to: {row: 1, column: 15}};
   const buf = await wb.xlsx.writeBuffer();
   await saveFile(`RHC payroll ${monthName(M)}.xlsx`, new Blob([buf], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}));
 }
@@ -1175,6 +1205,9 @@ document.addEventListener("click", async e => {
       if (c.type === "expense"){ const al = allocFor(c), miss = al.findIndex(x => !x.area || !x.line);
         if (miss >= 0){ toast(`Item ${miss + 1}: choose the area and budget line`); break; }
         args.p_allocations = al.map(x => ({area: x.area, entity: areaEnt(x.area), line: x.line})); }
+      if (c.type === "timesheet"){ const R = ratesFor(c), bad = R.findIndex(v => !(num(v) > 0 && num(v) <= 500));
+        if (bad >= 0){ toast("Every rate must be between £0.01 and £500 an hour"); break; }
+        if (R.some((v, i) => num(v) !== num(c.lines[i].rate))) args.p_rates = R.map(num); }
       b.disabled = true; rpc("approve_claim", args, `${c.ref} approved. ${c.type === "expense" ? "The bookkeeper has been emailed." : "It's ready for the " + monthName(c.payroll_month) + " payroll."}`); break; }
     case "reject": S.decideOpen = id; render(); { const t = $("#rejNote-" + CSS.escape(id)); if (t) t.focus(); } break;
     case "reject-cancel": S.decideOpen = null; render(); break;
@@ -1227,7 +1260,7 @@ function onPayBy(e){
 }
 function onField(e){
   const t = e.target;
-  if (onAlloc(e) || onPayBy(e) || onExField(e)) return;
+  if (onAlloc(e) || onRate(e) || onPayBy(e) || onExField(e)) return;
   if (t.id === "payMonth"){ if (e.type === "change"){ S.payMonth = t.value; S.confirmRun = false; render(); } return; }
   if (t.dataset && t.dataset.blI != null){ const row = blDraft()[+t.dataset.blI]; if (!row) return; const k = t.dataset.blK;
     if (k.startsWith("area:")){ const a = k.slice(5), cur = lineAreas(row).filter(z => z !== a); row.areas = t.checked ? cur.concat([a]) : cur; } else row[k] = t.type === "checkbox" ? t.checked : t.value; return; }
